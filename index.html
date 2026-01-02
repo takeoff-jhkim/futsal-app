@@ -8,7 +8,7 @@
     />
     <title>풋살 매니저 Pro</title>
 
-    <!-- PWA 설정 -->
+    <!-- PWA Settings -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta
       name="apple-mobile-web-app-status-bar-style"
@@ -21,7 +21,7 @@
       href="https://cdn-icons-png.flaticon.com/512/5323/5323977.png"
     />
 
-    <!-- 라이브러리 로드 -->
+    <!-- Libraries -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -29,13 +29,14 @@
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
     <script type="module">
-      import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+      // 안정성을 위해 11.0.1 버전을 사용합니다.
+      import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-app.js";
       import {
         getAuth,
         signInAnonymously,
         signInWithCustomToken,
         onAuthStateChanged,
-      } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+      } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-auth.js";
       import {
         getFirestore,
         doc,
@@ -43,9 +44,8 @@
         onSnapshot,
         collection,
         deleteDoc,
-      } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+      } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-firestore.js";
 
-      // ★★★ Firebase 콘솔에서 복사한 설정을 아래 myFirebaseConfig 안에 붙여넣으세요 ★★★
       const myFirebaseConfig = {
         apiKey: "AIzaSyAb4lVahCy8e01ZUtM7Ks4sQbQKJBN-U0Y",
         authDomain: "futsal-app-88658.firebaseapp.com",
@@ -55,24 +55,31 @@
         appId: "1:1034625078724:web:65593cf6d6795bf8f3c091",
       };
 
-      const envConfig = window.__firebase_config
-        ? JSON.parse(window.__firebase_config)
-        : null;
-      const firebaseConfig =
-        envConfig || (myFirebaseConfig.apiKey ? myFirebaseConfig : null);
+      const envConfigRaw = window.__firebase_config;
+      let envConfig = null;
+      try {
+        if (envConfigRaw) envConfig = JSON.parse(envConfigRaw);
+      } catch (e) {}
 
+      const firebaseConfig =
+        envConfig && envConfig.apiKey
+          ? envConfig
+          : myFirebaseConfig.apiKey
+          ? myFirebaseConfig
+          : null;
       const finalAppId =
         typeof __app_id !== "undefined" ? __app_id : "futsal-pwa-default";
       const initialToken = window.__initial_auth_token;
 
-      let db, auth;
-      if (firebaseConfig) {
+      let db = null,
+        auth = null;
+      if (firebaseConfig && firebaseConfig.apiKey) {
         try {
           const app = initializeApp(firebaseConfig);
           auth = getAuth(app);
           db = getFirestore(app);
         } catch (e) {
-          console.error("Firebase 초기화 실패:", e);
+          console.error("Firebase Init Error", e);
         }
       }
 
@@ -103,10 +110,6 @@
       .no-scrollbar::-webkit-scrollbar {
         display: none;
       }
-      .no-scrollbar {
-        -ms-overflow-style: none;
-        scrollbar-width: none;
-      }
       input[type="date"] {
         border: none;
         background: transparent;
@@ -121,7 +124,7 @@
       const { useState, useEffect, useMemo } = React;
 
       const App = () => {
-        const [fbLoaded, setFbLoaded] = useState(false);
+        const [fbStatus, setFbStatus] = useState("waiting"); // waiting, ready, local
         const [user, setUser] = useState(null);
         const [members, setMembers] = useState([]);
         const [attendance, setAttendance] = useState({});
@@ -131,14 +134,13 @@
         const [activeTab, setActiveTab] = useState("attendance");
         const [newName, setNewName] = useState("");
         const [isInitialLoading, setIsInitialLoading] = useState(true);
+        const [errorMessage, setErrorMessage] = useState(null);
 
-        // 1. FB_TOOLS 로드 대기 및 인증
+        // 1. Firebase 인스턴스 확인 및 인증 처리
         useEffect(() => {
-          const checkFB = setInterval(() => {
+          const timer = setInterval(() => {
             if (window.FB_TOOLS) {
-              setFbLoaded(true);
-              clearInterval(checkFB);
-
+              clearInterval(timer);
               const {
                 auth,
                 initialToken,
@@ -148,11 +150,13 @@
               } = window.FB_TOOLS;
 
               if (!auth) {
+                setFbStatus("local");
                 setUser({ uid: "local-user" });
                 setIsInitialLoading(false);
                 return;
               }
 
+              setFbStatus("ready");
               const initAuth = async () => {
                 try {
                   if (initialToken)
@@ -160,35 +164,44 @@
                   else await signInAnonymously(auth);
                 } catch (e) {
                   console.error("Auth Error", e);
+                  setErrorMessage(
+                    "인증 실패. '익명 로그인' 설정을 확인하세요."
+                  );
                 }
               };
               initAuth();
               onAuthStateChanged(auth, (u) => {
                 setUser(u);
-                setIsInitialLoading(false);
               });
             }
-          }, 100);
-          return () => clearInterval(checkFB);
+          }, 200);
+          return () => clearInterval(timer);
         }, []);
 
-        // 2. 데이터 동기화
+        // 2. 실시간 데이터 동기화 (인증 완료 후 실행)
         useEffect(() => {
-          if (!user || !fbLoaded) return;
-          const { db, appId, collection, onSnapshot } = window.FB_TOOLS;
+          if (!user || fbStatus === "waiting") return;
+          const {
+            db,
+            appId: fbAppId,
+            collection,
+            onSnapshot,
+          } = window.FB_TOOLS;
 
           if (!db) {
-            const m = localStorage.getItem("futsal_members_v6");
-            const a = localStorage.getItem("futsal_attendance_v6");
+            const m = localStorage.getItem("futsal_members_v11");
+            const a = localStorage.getItem("futsal_attendance_v11");
             if (m) setMembers(JSON.parse(m));
             if (a) setAttendance(JSON.parse(a));
+            setIsInitialLoading(false);
             return;
           }
 
+          // RULE 3: Auth 완료 후 쿼리 수행
           const membersRef = collection(
             db,
             "artifacts",
-            appId,
+            fbAppId,
             "public",
             "data",
             "members"
@@ -196,7 +209,7 @@
           const attendanceRef = collection(
             db,
             "artifacts",
-            appId,
+            fbAppId,
             "public",
             "data",
             "attendance"
@@ -206,8 +219,13 @@
             membersRef,
             (snap) => {
               setMembers(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+              setIsInitialLoading(false);
             },
-            (err) => console.error("Members load error", err)
+            (err) => {
+              console.error("Snapshot error", err);
+              if (err.code === "permission-denied")
+                setErrorMessage("권한 오류. Firestore 규칙을 확인하세요.");
+            }
           );
 
           const unsubAttendance = onSnapshot(
@@ -219,157 +237,171 @@
               });
               setAttendance(attObj);
             },
-            (err) => console.error("Attendance load error", err)
+            (err) => console.error("Attendance snapshot error", err)
           );
 
           return () => {
             unsubMembers();
             unsubAttendance();
           };
-        }, [user, fbLoaded]);
+        }, [user, fbStatus]);
 
-        // 로컬 스토리지 백업
+        // 로컬 모드용 저장
         useEffect(() => {
-          if (fbLoaded && !window.FB_TOOLS.db && !isInitialLoading) {
-            localStorage.setItem("futsal_members_v6", JSON.stringify(members));
+          if (fbStatus === "local" && !isInitialLoading) {
+            localStorage.setItem("futsal_members_v11", JSON.stringify(members));
             localStorage.setItem(
-              "futsal_attendance_v6",
+              "futsal_attendance_v11",
               JSON.stringify(attendance)
             );
           }
           if (window.lucide) lucide.createIcons();
-        }, [members, attendance, isInitialLoading, activeTab, fbLoaded]);
+        }, [members, attendance, isInitialLoading, activeTab, fbStatus]);
 
-        // 점수 계산 로직 수정 (참석+1, 무단-1)
+        // 점수 계산
         const stats = useMemo(() => {
           const res = {};
           members.forEach((m) => {
-            let total = 0;
-            let presentCount = 0;
-
+            let total = 0,
+              presentCount = 0;
             const memberKeys = Object.keys(attendance).filter((k) =>
               k.includes(`_${m.id}`)
             );
             const dates = Array.from(
               new Set(memberKeys.map((k) => k.split("_")[0]))
             );
-
             dates.forEach((date) => {
               const baseKey = `${date}_${m.id}`;
-              const status = attendance[baseKey];
-              const isNoShow = attendance[`${baseKey}_noshow`];
-
-              // 무단이 체크되어 있으면 -1점
-              if (isNoShow) {
+              if (attendance[`${baseKey}_noshow`]) {
                 total -= 1;
-              } else if (status === "present") {
-                // 참석이면 +1점
+              } else if (attendance[baseKey] === "present") {
                 total += 1;
                 presentCount += 1;
               }
-              // 불참(absent)은 0점
             });
             res[m.id] = { total, presentCount };
           });
           return res;
         }, [members, attendance]);
 
-        // 상태 업데이트
-        const handleStatus = async (mId, status) => {
-          if (!user || !fbLoaded) return;
-          const { db, appId, doc, setDoc } = window.FB_TOOLS;
-          const baseKey = `${selectedDate}_${mId}`;
+        // 랭킹 정렬
+        const sortedMembersByRanking = useMemo(() => {
+          return [...members].sort((a, b) => {
+            const scoreA = stats[a.id]?.total || 0;
+            const scoreB = stats[b.id]?.total || 0;
+            if (scoreB !== scoreA) return scoreB - scoreA;
+            return a.name.localeCompare(b.name, "ko");
+          });
+        }, [members, stats]);
 
-          if (status === "no-show") {
-            const noshowKey = `${baseKey}_noshow`;
-            const newValue = !attendance[noshowKey];
-            if (db) {
-              await setDoc(
-                doc(
-                  db,
-                  "artifacts",
-                  appId,
-                  "public",
-                  "data",
-                  "attendance",
-                  noshowKey
-                ),
-                { value: newValue }
-              );
+        const handleStatus = async (mId, status) => {
+          if (!user) return;
+          const { db, appId: fbAppId, doc, setDoc } = window.FB_TOOLS;
+          const baseKey = `${selectedDate}_${mId}`;
+          try {
+            if (status === "no-show") {
+              const noshowKey = `${baseKey}_noshow`;
+              const newValue = !attendance[noshowKey];
+              if (db)
+                await setDoc(
+                  doc(
+                    db,
+                    "artifacts",
+                    fbAppId,
+                    "public",
+                    "data",
+                    "attendance",
+                    noshowKey
+                  ),
+                  { value: newValue }
+                );
+              else
+                setAttendance((prev) => ({ ...prev, [noshowKey]: newValue }));
             } else {
-              setAttendance((prev) => ({ ...prev, [noshowKey]: newValue }));
+              const newValue = attendance[baseKey] === status ? null : status;
+              if (db)
+                await setDoc(
+                  doc(
+                    db,
+                    "artifacts",
+                    fbAppId,
+                    "public",
+                    "data",
+                    "attendance",
+                    baseKey
+                  ),
+                  { value: newValue }
+                );
+              else setAttendance((prev) => ({ ...prev, [baseKey]: newValue }));
             }
-          } else {
-            // 참석, 불참만 토글
-            const newValue = attendance[baseKey] === status ? null : status;
-            if (db) {
-              await setDoc(
-                doc(
-                  db,
-                  "artifacts",
-                  appId,
-                  "public",
-                  "data",
-                  "attendance",
-                  baseKey
-                ),
-                { value: newValue }
-              );
-            } else {
-              setAttendance((prev) => ({ ...prev, [baseKey]: newValue }));
-            }
+          } catch (err) {
+            console.error(err);
+            setErrorMessage("저장 실패.");
           }
         };
 
         const addMember = async (e) => {
           e.preventDefault();
-          if (!newName.trim() || !user || !fbLoaded) return;
-          const { db, appId, doc, setDoc } = window.FB_TOOLS;
+          if (!newName.trim() || !user) return;
+          const { db, appId: fbAppId, doc, setDoc } = window.FB_TOOLS;
           const id = Date.now().toString();
-          if (db) {
-            await setDoc(
-              doc(db, "artifacts", appId, "public", "data", "members", id),
-              { name: newName }
-            );
-          } else {
-            setMembers((prev) => [...prev, { id, name: newName }]);
+          try {
+            if (db)
+              await setDoc(
+                doc(db, "artifacts", fbAppId, "public", "data", "members", id),
+                { name: newName }
+              );
+            else setMembers((prev) => [...prev, { id, name: newName }]);
+            setNewName("");
+          } catch (err) {
+            setErrorMessage("멤버 추가 실패.");
           }
-          setNewName("");
         };
 
         const removeMember = async (id) => {
-          if (
-            !confirm(
-              "이 멤버를 삭제하시겠습니까? 관련 데이터가 모두 삭제됩니다."
-            )
-          )
-            return;
-          const { db, appId, doc, deleteDoc } = window.FB_TOOLS;
-          if (db) {
-            await deleteDoc(
-              doc(db, "artifacts", appId, "public", "data", "members", id)
-            );
-          } else {
-            setMembers((prev) => prev.filter((m) => m.id !== id));
+          if (!confirm("삭제하시겠습니까?")) return;
+          const { db, appId: fbAppId, doc, deleteDoc } = window.FB_TOOLS;
+          try {
+            if (db)
+              await deleteDoc(
+                doc(db, "artifacts", fbAppId, "public", "data", "members", id)
+              );
+            else setMembers((prev) => prev.filter((m) => m.id !== id));
+          } catch (err) {
+            setErrorMessage("삭제 실패.");
           }
         };
 
         if (isInitialLoading)
           return (
-            <div className="flex flex-col h-screen items-center justify-center bg-blue-50">
-              <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-4"></div>
-              <p className="text-blue-600 font-bold animate-pulse">
-                데이터 연결 중...
-              </p>
+            <div className="flex h-screen items-center justify-center bg-white">
+              <div className="flex flex-col items-center">
+                <div className="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-4"></div>
+                <p className="text-gray-400 text-sm font-medium">
+                  데이터 불러오는 중...
+                </p>
+              </div>
             </div>
           );
 
         return (
           <div className="max-w-md mx-auto bg-white min-h-screen flex flex-col shadow-2xl relative">
+            {errorMessage && (
+              <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 w-[90%] bg-red-600 text-white px-4 py-3 rounded-xl shadow-2xl flex justify-between items-center">
+                <span className="text-xs font-bold">{errorMessage}</span>
+                <button
+                  onClick={() => setErrorMessage(null)}
+                  className="bg-white/20 p-1 rounded-lg"
+                >
+                  <i data-lucide="x" className="w-3 h-3"></i>
+                </button>
+              </div>
+            )}
+
             <header className="bg-blue-600 p-6 pt-12 rounded-b-[2.5rem] shadow-lg text-white">
               <div className="flex justify-between items-center mb-6">
                 <div>
-                  <h1 className="text-2xl font-black tracking-tighter italic leading-none">
+                  <h1 className="text-2xl font-black italic tracking-tighter leading-none">
                     FUTSAL MANAGER
                   </h1>
                   <div className="flex items-center gap-1.5 mt-2 opacity-70">
@@ -385,15 +417,15 @@
                     </p>
                   </div>
                 </div>
-                <div className="bg-white/10 p-2.5 rounded-2xl active:scale-90 transition-transform">
-                  <i data-lucide="settings" className="w-5 h-5"></i>
+                <div className="bg-white/10 p-2.5 rounded-2xl">
+                  <i data-lucide="settings" className="w-5 h-5 text-white"></i>
                 </div>
               </div>
               <div className="bg-white rounded-2xl p-4 flex items-center gap-4 text-gray-800 shadow-inner">
                 <i data-lucide="calendar" className="text-blue-600 w-6 h-6"></i>
                 <div className="flex-1">
-                  <p className="text-[10px] text-gray-400 font-bold uppercase mb-0.5">
-                    매치 데이
+                  <p className="text-[10px] text-gray-400 font-bold uppercase mb-0.5 tracking-wider">
+                    MATCH DAY
                   </p>
                   <input
                     type="date"
@@ -423,10 +455,10 @@
             <main className="flex-1 px-6 pb-28 overflow-y-auto no-scrollbar">
               {activeTab === "attendance" ? (
                 <div className="space-y-4">
-                  <div className="flex justify-between items-center px-1 text-[11px] font-black text-gray-400 uppercase tracking-widest">
-                    <span>Team Members ({members.length})</span>
-                    <span className="text-blue-600">
-                      오늘 참석:{" "}
+                  <div className="flex justify-between items-center px-1 text-[10px] font-black text-gray-400 uppercase tracking-widest">
+                    <span>Member List</span>
+                    <span className="text-blue-600 bg-blue-50 px-2 py-0.5 rounded-md">
+                      참석:{" "}
                       {
                         members.filter(
                           (m) =>
@@ -436,22 +468,18 @@
                       명
                     </span>
                   </div>
-                  {members.length === 0 && (
-                    <div className="text-center py-20 text-gray-300 font-bold">
-                      멤버를 추가하세요!
-                    </div>
-                  )}
+
                   {members.map((m) => (
                     <div
                       key={m.id}
-                      className="bg-white border border-gray-100 rounded-[1.5rem] p-4 shadow-sm hover:shadow-md transition-shadow"
+                      className="bg-white border border-gray-100 rounded-[1.5rem] p-4 shadow-sm"
                     >
                       <div className="flex justify-between items-center mb-4 px-1">
                         <div className="flex flex-col">
-                          <span className="font-black text-gray-800 text-lg">
+                          <span className="font-black text-gray-800 text-lg leading-none">
                             {m.name}
                           </span>
-                          <span className="text-[10px] text-blue-500 font-bold bg-blue-50 px-2 py-0.5 rounded-full self-start mt-1">
+                          <span className="text-[10px] text-blue-500 font-bold mt-1.5 italic">
                             Score: {stats[m.id]?.total || 0}pt
                           </span>
                         </div>
@@ -462,7 +490,6 @@
                           <i data-lucide="trash-2" className="w-4 h-4"></i>
                         </button>
                       </div>
-                      {/* 미투표 삭제됨 - 3개 버튼 구성 */}
                       <div className="grid grid-cols-3 gap-2">
                         <StatusBtn
                           label="참석"
@@ -483,7 +510,7 @@
                           onClick={() => handleStatus(m.id, "absent")}
                         />
                         <StatusBtn
-                          label="당일불참"
+                          label="무단"
                           score="-1"
                           color="bg-rose-500"
                           active={
@@ -494,19 +521,20 @@
                       </div>
                     </div>
                   ))}
+
                   <form
                     onSubmit={addMember}
-                    className="mt-8 p-4 bg-slate-50 rounded-3xl border-2 border-dashed border-slate-200 flex gap-3 focus-within:border-blue-400 transition-colors"
+                    className="mt-8 p-4 bg-slate-100 rounded-3xl border-2 border-dashed border-slate-200 flex gap-3 focus-within:border-blue-400 transition-all"
                   >
                     <input
                       value={newName}
                       onChange={(e) => setNewName(e.target.value)}
-                      placeholder="팀원 이름 입력"
+                      placeholder="이름 입력"
                       className="flex-1 bg-transparent outline-none text-sm font-bold text-gray-600"
                     />
                     <button
                       type="submit"
-                      className="bg-blue-600 text-white p-2.5 rounded-2xl shadow-lg active:scale-90 transition-transform"
+                      className="bg-blue-600 text-white p-2.5 rounded-2xl shadow-lg"
                     >
                       <i data-lucide="plus" className="w-6 h-6"></i>
                     </button>
@@ -514,54 +542,48 @@
                 </div>
               ) : (
                 <div className="space-y-3">
-                  <h2 className="text-[11px] font-black text-gray-400 uppercase tracking-widest mb-4 px-1">
-                    Hall of Fame
+                  <h2 className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-4 px-1">
+                    Season Standings
                   </h2>
-                  {members
-                    .sort(
-                      (a, b) =>
-                        (stats[b.id]?.total || 0) - (stats[a.id]?.total || 0) ||
-                        a.name.localeCompare(b.name)
-                    )
-                    .map((m, i) => (
+                  {sortedMembersByRanking.map((m, i) => (
+                    <div
+                      key={m.id}
+                      className="flex items-center gap-4 bg-white p-5 rounded-[1.5rem] border border-gray-100 shadow-sm transition-all active:scale-[0.98]"
+                    >
                       <div
-                        key={m.id}
-                        className="flex items-center gap-4 bg-white p-5 rounded-[1.5rem] border border-gray-100 shadow-sm transition-all active:scale-[0.98]"
+                        className={`w-12 h-12 rounded-2xl flex items-center justify-center font-black text-xl shadow-sm ${
+                          i === 0
+                            ? "bg-yellow-400 text-white shadow-lg"
+                            : i === 1
+                            ? "bg-slate-300 text-white"
+                            : i === 2
+                            ? "bg-orange-300 text-white"
+                            : "bg-gray-50 text-gray-400"
+                        }`}
                       >
-                        <div
-                          className={`w-12 h-12 rounded-2xl flex items-center justify-center font-black text-xl ${
-                            i === 0
-                              ? "bg-yellow-400 text-white shadow-lg shadow-yellow-200"
-                              : i === 1
-                              ? "bg-slate-300 text-white"
-                              : i === 2
-                              ? "bg-orange-300 text-white"
-                              : "bg-gray-50 text-gray-400"
-                          }`}
-                        >
-                          {i + 1}
+                        {i + 1}
+                      </div>
+                      <div className="flex-1">
+                        <div className="font-black text-gray-800 text-lg leading-tight">
+                          {m.name}
                         </div>
-                        <div className="flex-1">
-                          <div className="font-black text-gray-800 text-lg leading-tight">
-                            {m.name}
-                          </div>
-                          <div className="text-[10px] text-gray-400 font-bold uppercase mt-0.5">
-                            Played: {stats[m.id]?.presentCount || 0} matches
-                          </div>
-                        </div>
-                        <div
-                          className={`text-2xl font-black tracking-tighter ${
-                            stats[m.id]?.total >= 0
-                              ? "text-blue-600"
-                              : "text-rose-500"
-                          }`}
-                        >
-                          {stats[m.id]?.total > 0
-                            ? `+${stats[m.id].total}`
-                            : stats[m.id]?.total || 0}
+                        <div className="text-[10px] text-gray-400 font-bold uppercase mt-1 tracking-tighter">
+                          Played {stats[m.id]?.presentCount || 0} Match(es)
                         </div>
                       </div>
-                    ))}
+                      <div
+                        className={`text-2xl font-black tracking-tighter ${
+                          stats[m.id]?.total >= 0
+                            ? "text-blue-600"
+                            : "text-rose-500"
+                        }`}
+                      >
+                        {stats[m.id]?.total > 0
+                          ? `+${stats[m.id].total}`
+                          : stats[m.id]?.total || 0}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </main>
@@ -569,7 +591,6 @@
           </div>
         );
       };
-
       const TabBtn = ({ active, onClick, label, icon }) => (
         <button
           onClick={onClick}
@@ -582,21 +603,20 @@
           <i data-lucide={icon} className="w-4 h-4"></i> {label}
         </button>
       );
-
       const StatusBtn = ({ label, score, color, active, onClick }) => (
         <button
           onClick={onClick}
           className={`flex-1 flex flex-col items-center py-3 rounded-2xl border-2 transition-all active:scale-95 ${
             active
-              ? `${color} text-white border-transparent shadow-lg`
+              ? `${color} text-white border-transparent shadow-lg shadow-blue-100`
               : "bg-white text-gray-400 border-gray-50 hover:border-gray-200"
           }`}
         >
-          <span className="text-[11px] font-black tracking-tighter uppercase">
+          <span className="text-[11px] font-black tracking-tighter uppercase leading-none">
             {label}
           </span>
           <span
-            className={`text-[9px] font-bold mt-0.5 ${
+            className={`text-[9px] font-bold mt-1 ${
               active ? "text-white/80" : "text-gray-300"
             }`}
           >
@@ -604,7 +624,6 @@
           </span>
         </button>
       );
-
       const root = ReactDOM.createRoot(document.getElementById("root"));
       root.render(<App />);
       setInterval(() => {
