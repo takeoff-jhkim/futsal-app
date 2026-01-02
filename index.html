@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+    <title>풋살 매니저 PWA</title>
+
+    <!-- PWA 설정을 위한 메타 태그 -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta
+      name="apple-mobile-web-app-status-bar-style"
+      content="black-translucent"
+    />
+    <meta name="apple-mobile-web-app-title" content="풋살매니저" />
+    <meta name="theme-color" content="#2563EB" />
+    <link
+      rel="apple-touch-icon"
+      href="https://cdn-icons-png.flaticon.com/512/5323/5323977.png"
+    />
+
+    <!-- Tailwind CSS & Lucide Icons -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- React & Firebase SDK -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <script type="module">
+      import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+      import {
+        getAuth,
+        signInAnonymously,
+        signInWithCustomToken,
+        onAuthStateChanged,
+      } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+      import {
+        getFirestore,
+        doc,
+        setDoc,
+        onSnapshot,
+        collection,
+        query,
+      } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+      // 전역 설정 로드
+      const firebaseConfig = JSON.parse(window.__firebase_config || "{}");
+      const appId = window.__app_id || "futsal-pwa-default";
+      const initialToken = window.__initial_auth_token;
+
+      // Firebase 서비스 초기화 (컴포넌트 외부에서 1회 실행)
+      const app = initializeApp(firebaseConfig);
+      const auth = getAuth(app);
+      const db = getFirestore(app);
+
+      window.FB_INSTANCE = {
+        auth,
+        db,
+        appId,
+        initialToken,
+        signInAnonymously,
+        signInWithCustomToken,
+        onAuthStateChanged,
+        collection,
+        doc,
+        setDoc,
+        onSnapshot,
+      };
+    </script>
+
+    <style>
+      body {
+        -webkit-tap-highlight-color: transparent;
+      }
+      .no-scrollbar::-webkit-scrollbar {
+        display: none;
+      }
+      input[type="date"]::-webkit-calendar-picker-indicator {
+        filter: invert(1);
+      }
+    </style>
+  </head>
+  <body class="bg-gray-100">
+    <div id="root"></div>
+
+    <script type="text/babel">
+      const { useState, useEffect, useMemo } = React;
+      const {
+        auth,
+        db,
+        appId,
+        initialToken,
+        signInAnonymously,
+        signInWithCustomToken,
+        onAuthStateChanged,
+        collection,
+        doc,
+        setDoc,
+        onSnapshot,
+      } = window.FB_INSTANCE;
+
+      const App = () => {
+        const [user, setUser] = useState(null);
+        const [members, setMembers] = useState([]);
+        const [attendance, setAttendance] = useState({});
+        const [selectedDate, setSelectedDate] = useState(
+          new Date().toISOString().split("T")[0]
+        );
+        const [activeTab, setActiveTab] = useState("attendance");
+        const [newName, setNewName] = useState("");
+        const [loading, setLoading] = useState(true);
+
+        // 1. 인증 프로세스 (규칙 준수: 인증을 가장 먼저 실행)
+        useEffect(() => {
+          const initAuth = async () => {
+            try {
+              if (initialToken) {
+                await signInWithCustomToken(auth, initialToken);
+              } else {
+                await signInAnonymously(auth);
+              }
+            } catch (error) {
+              console.error("Auth Error:", error);
+            }
+          };
+          initAuth();
+          const unsubscribe = onAuthStateChanged(auth, (u) => {
+            setUser(u);
+          });
+          return () => unsubscribe();
+        }, []);
+
+        // 2. 실시간 데이터 동기화 (규칙 준수: if (!user) return 추가 및 에러 콜백 필수)
+        useEffect(() => {
+          if (!user) return;
+
+          const membersRef = collection(
+            db,
+            "artifacts",
+            appId,
+            "public",
+            "data",
+            "members"
+          );
+          const attendanceRef = collection(
+            db,
+            "artifacts",
+            appId,
+            "public",
+            "data",
+            "attendance"
+          );
+
+          // 멤버 데이터 구독
+          const unsubMembers = onSnapshot(
+            membersRef,
+            (snapshot) => {
+              const mList = snapshot.docs.map((d) => ({
+                id: d.id,
+                ...d.data(),
+              }));
+              // 데이터가 없을 때 기본값 설정
+              if (mList.length === 0 && loading) {
+                setMembers([
+                  { id: "1", name: "김철수" },
+                  { id: "2", name: "이영희" },
+                ]);
+              } else {
+                setMembers(mList);
+              }
+              setLoading(false);
+            },
+            (error) => {
+              console.error("Members Snapshot Error:", error);
+            }
+          );
+
+          // 출석 데이터 구독
+          const unsubAttendance = onSnapshot(
+            attendanceRef,
+            (snapshot) => {
+              const attObj = {};
+              snapshot.docs.forEach((d) => {
+                attObj[d.id] = d.data().status;
+              });
+              setAttendance(attObj);
+            },
+            (error) => {
+              console.error("Attendance Snapshot Error:", error);
+            }
+          );
+
+          return () => {
+            unsubMembers();
+            unsubAttendance();
+          };
+        }, [user]);
+
+        // 3. 점수 계산 로직
+        const getScore = (status) => {
+          const rules = { present: 1, "no-vote": -1, "no-show": -1, absent: 0 };
+          return rules[status] || 0;
+        };
+
+        const stats = useMemo(() => {
+          const res = {};
+          members.forEach((m) => {
+            let total = 0;
+            let count = 0;
+            Object.keys(attendance).forEach((key) => {
+              if (key.endsWith(`_${m.id}`)) {
+                total += getScore(attendance[key]);
+                if (attendance[key] === "present") count++;
+              }
+            });
+            res[m.id] = { total, count };
+          });
+          return res;
+        }, [members, attendance]);
+
+        // 4. 데이터 업데이트 함수 (인증 체크 포함)
+        const updateStatus = async (mId, status) => {
+          if (!user) return;
+          const key = `${selectedDate}_${mId}`;
+          const newStatus = attendance[key] === status ? null : status;
+          try {
+            await setDoc(
+              doc(db, "artifacts", appId, "public", "data", "attendance", key),
+              { status: newStatus }
+            );
+          } catch (error) {
+            console.error("Update Status Error:", error);
+          }
+        };
+
+        const addMember = async (e) => {
+          e.preventDefault();
+          if (!newName.trim() || !user) return;
+          const id = Date.now().toString();
+          try {
+            await setDoc(
+              doc(db, "artifacts", appId, "public", "data", "members", id),
+              { name: newName }
+            );
+            setNewName("");
+          } catch (error) {
+            console.error("Add Member Error:", error);
+          }
+        };
+
+        if (loading)
+          return (
+            <div className="flex flex-col items-center justify-center h-screen bg-white">
+              <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-4"></div>
+              <p className="text-blue-600 font-bold">
+                인증 및 데이터 로드 중...
+              </p>
+            </div>
+          );
+
+        return (
+          <div className="max-w-md mx-auto bg-white min-h-screen flex flex-col shadow-xl">
+            {/* Header */}
+            <header className="bg-blue-600 p-6 pt-10 rounded-b-3xl shadow-lg">
+              <div className="flex justify-between items-center text-white mb-6">
+                <div>
+                  <h1 className="text-2xl font-black italic tracking-tighter">
+                    FUTSAL MANAGER
+                  </h1>
+                  <div className="flex items-center gap-1 mt-1 opacity-70">
+                    <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                    <p className="text-[10px]">클라우드 실시간 동기화</p>
+                  </div>
+                </div>
+                <div className="bg-white/20 p-2 rounded-full">
+                  <i data-lucide="settings" className="w-5 h-5"></i>
+                </div>
+              </div>
+              <div className="bg-white/10 backdrop-blur-md rounded-2xl p-3 flex items-center gap-3 border border-white/20">
+                <i data-lucide="calendar" className="text-white w-5 h-5"></i>
+                <input
+                  type="date"
+                  value={selectedDate}
+                  onChange={(e) => setSelectedDate(e.target.value)}
+                  className="bg-transparent text-white font-bold outline-none w-full appearance-none"
+                />
+              </div>
+            </header>
+
+            {/* Tabs */}
+            <div className="flex px-6 -mt-5 mb-4 gap-2">
+              <TabBtn
+                active={activeTab === "attendance"}
+                onClick={() => setActiveTab("attendance")}
+                label="출석체크"
+                icon="user-check"
+              />
+              <TabBtn
+                active={activeTab === "ranking"}
+                onClick={() => setActiveTab("ranking")}
+                label="시즌랭킹"
+                icon="trophy"
+              />
+            </div>
+
+            <main className="flex-1 px-6 pb-24 overflow-y-auto no-scrollbar">
+              {activeTab === "attendance" ? (
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center text-gray-500 text-xs font-bold px-1 mb-2">
+                    <span>멤버 {members.length}명</span>
+                    <span className="text-blue-600">
+                      참석 확정:{" "}
+                      {
+                        members.filter(
+                          (m) =>
+                            attendance[`${selectedDate}_${m.id}`] === "present"
+                        ).length
+                      }
+                      명
+                    </span>
+                  </div>
+                  {members.map((m) => (
+                    <div
+                      key={m.id}
+                      className="bg-white border border-gray-100 rounded-2xl p-4 shadow-sm transition-all active:scale-[0.98]"
+                    >
+                      <div className="font-bold text-gray-800 mb-3 flex justify-between">
+                        <span>{m.name}</span>
+                        <span className="text-[10px] text-blue-500 bg-blue-50 px-2 py-0.5 rounded-full">
+                          {stats[m.id]?.total || 0}pt
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-4 gap-2">
+                        <StatusBtn
+                          active={
+                            attendance[`${selectedDate}_${m.id}`] === "present"
+                          }
+                          color="bg-green-500"
+                          label="참석"
+                          score="+1"
+                          onClick={() => updateStatus(m.id, "present")}
+                        />
+                        <StatusBtn
+                          active={
+                            attendance[`${selectedDate}_${m.id}`] === "absent"
+                          }
+                          color="bg-gray-400"
+                          label="불참"
+                          score="0"
+                          onClick={() => updateStatus(m.id, "absent")}
+                        />
+                        <StatusBtn
+                          active={
+                            attendance[`${selectedDate}_${m.id}`] === "no-vote"
+                          }
+                          color="bg-orange-500"
+                          label="미투표"
+                          score="-1"
+                          onClick={() => updateStatus(m.id, "no-vote")}
+                        />
+                        <StatusBtn
+                          active={
+                            attendance[`${selectedDate}_${m.id}`] === "no-show"
+                          }
+                          color="bg-red-500"
+                          label="무단"
+                          score="-1"
+                          onClick={() => updateStatus(m.id, "no-show")}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                  <form
+                    onSubmit={addMember}
+                    className="flex gap-2 mt-8 p-4 bg-gray-50 rounded-2xl border border-dashed border-gray-300"
+                  >
+                    <input
+                      value={newName}
+                      onChange={(e) => setNewName(e.target.value)}
+                      placeholder="새로운 팀원 성함"
+                      className="flex-1 bg-transparent outline-none text-sm font-bold"
+                    />
+                    <button
+                      type="submit"
+                      className="bg-blue-600 text-white p-2 rounded-xl shadow-lg shadow-blue-200 active:scale-95 transition-transform"
+                    >
+                      <i data-lucide="plus"></i>
+                    </button>
+                  </form>
+                </div>
+              ) : (
+                <div className="space-y-3 mt-2">
+                  <p className="text-[10px] text-gray-400 font-bold mb-4 bg-gray-50 p-2 rounded-lg italic">
+                    ※ 동률일 경우 가나다순으로 표시됩니다.
+                  </p>
+                  {members
+                    .sort(
+                      (a, b) =>
+                        (stats[b.id]?.total || 0) - (stats[a.id]?.total || 0) ||
+                        a.name.localeCompare(b.name)
+                    )
+                    .map((m, i) => (
+                      <div
+                        key={m.id}
+                        className="flex items-center gap-4 bg-white p-4 rounded-2xl border border-gray-100 shadow-sm"
+                      >
+                        <div
+                          className={`w-8 h-8 rounded-full flex items-center justify-center font-black text-sm ${
+                            i < 3
+                              ? "bg-yellow-400 text-white"
+                              : "bg-gray-100 text-gray-400"
+                          }`}
+                        >
+                          {i + 1}
+                        </div>
+                        <div className="flex-1">
+                          <div className="font-bold text-gray-800">
+                            {m.name}
+                          </div>
+                          <div className="text-[10px] text-gray-400">
+                            참석 {stats[m.id]?.count || 0}회 / 총점{" "}
+                            {stats[m.id]?.total || 0}점
+                          </div>
+                        </div>
+                        <div
+                          className={`text-xl font-black ${
+                            stats[m.id]?.total >= 0
+                              ? "text-blue-600"
+                              : "text-red-500"
+                          }`}
+                        >
+                          {stats[m.id]?.total > 0
+                            ? `+${stats[m.id].total}`
+                            : stats[m.id]?.total || 0}
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              )}
+            </main>
+
+            {/* Footer Deco */}
+            <div className="fixed bottom-6 left-1/2 -translate-x-1/2 w-32 h-1 bg-gray-200 rounded-full opacity-50"></div>
+          </div>
+        );
+      };
+
+      const TabBtn = ({ active, onClick, label, icon }) => (
+        <button
+          onClick={onClick}
+          className={`flex-1 py-4 rounded-2xl font-black flex items-center justify-center gap-2 transition-all shadow-md ${
+            active
+              ? "bg-white text-blue-600 scale-[1.02]"
+              : "bg-gray-200 text-gray-400 opacity-80"
+          }`}
+        >
+          <i data-lucide={icon} className="w-4 h-4"></i> {label}
+        </button>
+      );
+
+      const StatusBtn = ({ active, color, label, score, onClick }) => (
+        <button
+          onClick={onClick}
+          className={`flex flex-col items-center py-2.5 rounded-xl border-2 transition-all active:scale-90 ${
+            active
+              ? `${color} text-white border-transparent shadow-inner`
+              : "bg-white text-gray-400 border-gray-50"
+          }`}
+        >
+          <span className="text-[10px] font-black">{label}</span>
+          <span className="text-[9px] font-bold opacity-70">{score}</span>
+        </button>
+      );
+
+      const root = ReactDOM.createRoot(document.getElementById("root"));
+      root.render(<App />);
+
+      // 아이콘 주기적 생성 루틴
+      setInterval(() => lucide.createIcons(), 1000);
+    </script>
+  </body>
+</html>
