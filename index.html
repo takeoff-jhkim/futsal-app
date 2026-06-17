@@ -8,7 +8,6 @@
     />
     <title>도라꾸FC 출석부</title>
 
-    <!-- PWA Settings -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta
       name="apple-mobile-web-app-status-bar-style"
@@ -21,22 +20,18 @@
       href="https://cdn-icons-png.flaticon.com/512/5323/5323977.png"
     />
 
-    <!-- 404 Favicon 에러 방지 -->
     <link
       rel="icon"
       href="data:;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
     />
 
-    <!-- Libraries (전역 정적 로드 방식) -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 
-    <!-- 안정적인 하위 호환 가상 컴파일러 셋업 -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/6.26.0/babel.min.js"></script>
 
-    <!-- Firebase 호환성(Compat) 라이브러리 고정 -->
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
@@ -121,7 +116,6 @@
   <body>
     <div id="root"></div>
 
-    <!-- React 컴포넌트 실행 구역 (Babel 컴파일) -->
     <script type="text/babel">
       const { useState, useEffect, useMemo } = React;
 
@@ -138,10 +132,11 @@
         const [isInitialLoading, setIsInitialLoading] = useState(true);
         const [errorMessage, setErrorMessage] = useState(null);
 
-        // 당일불참 사유 관련 상태
+        // 사유 수집용 모달 상태 (type: 'absent' 또는 'no-show')
         const [reasonModal, setReasonModal] = useState({
           isOpen: false,
           memberId: null,
+          type: "",
           reason: "",
         });
         const [expandedMemberId, setExpandedMemberId] = useState(null);
@@ -177,8 +172,8 @@
           const { db, appId: fbAppId } = window.FB_TOOLS;
 
           if (!db) {
-            const m = localStorage.getItem("futsal_members_v17");
-            const a = localStorage.getItem("futsal_attendance_v17");
+            const m = localStorage.getItem("futsal_members_v18");
+            const a = localStorage.getItem("futsal_attendance_v18");
             if (m) setMembers(JSON.parse(m));
             if (a) setAttendance(JSON.parse(a));
             setIsInitialLoading(false);
@@ -219,21 +214,24 @@
         // 로컬 자동 백업 및 아이콘 동기화
         useEffect(() => {
           if (fbStatus === "local" && !isInitialLoading) {
-            localStorage.setItem("futsal_members_v17", JSON.stringify(members));
+            localStorage.setItem("futsal_members_v18", JSON.stringify(members));
             localStorage.setItem(
-              "futsal_attendance_v17",
+              "futsal_attendance_v18",
               JSON.stringify(attendance),
             );
           }
           if (window.lucide) lucide.createIcons();
         }, [members, attendance, isInitialLoading, activeTab, fbStatus]);
 
-        // 점수 계산 (?. 문법 제거하고 안전한 검사식으로 교체)
+        // 통합 통계 및 점수 계산 구조
         const stats = useMemo(() => {
           const res = {};
           members.forEach((m) => {
-            let total = 0,
-              presentCount = 0;
+            let totalScore = 0;
+            let presentCount = 0;
+            let absentCount = 0;
+            let noshowCount = 0;
+
             const memberKeys = Object.keys(attendance).filter(
               (k) => k.indexOf("_" + m.id) !== -1,
             );
@@ -244,37 +242,81 @@
             dates.forEach((date) => {
               const baseKey = date + "_" + m.id;
               if (attendance[baseKey + "_noshow"]) {
-                total -= 1;
+                totalScore -= 1;
+                noshowCount += 1;
               } else if (attendance[baseKey] === "present") {
-                total += 1;
+                totalScore += 1;
                 presentCount += 1;
+              } else if (attendance[baseKey] === "absent") {
+                absentCount += 1;
               }
             });
-            res[m.id] = { total: total, presentCount: presentCount };
+
+            const totalActiveDays = presentCount + absentCount + noshowCount;
+            res[m.id] = {
+              total: totalScore,
+              present: presentCount,
+              absent: absentCount,
+              noshow: noshowCount,
+              totalDays: totalActiveDays,
+              // 상태별 퍼센트 계산 (경기 기록이 있을 때만 계산)
+              presentPct:
+                totalActiveDays > 0
+                  ? ((presentCount / totalActiveDays) * 100).toFixed(1)
+                  : "0.0",
+              absentPct:
+                totalActiveDays > 0
+                  ? ((absentCount / totalActiveDays) * 100).toFixed(1)
+                  : "0.0",
+              noshowPct:
+                totalActiveDays > 0
+                  ? ((noshowCount / totalActiveDays) * 100).toFixed(1)
+                  : "0.0",
+            };
           });
           return res;
         }, [members, attendance]);
 
-        // 과거 사유 히스토리 파싱
+        // 과거 불참 및 당일불참 모든 통합 히스토리 파싱
         const getAbsentHistory = (memberId) => {
           const history = [];
           Object.keys(attendance).forEach((key) => {
-            if (
-              key.indexOf("_" + memberId + "_noshow") !== -1 &&
-              attendance[key]
-            ) {
-              const date = key.split("_")[0];
-              const reasonKey = date + "_" + memberId + "_reason";
+            const date = key.split("_")[0];
+            const reasonKey = date + "_" + memberId + "_reason";
+
+            // 당일불참 매칭 조건
+            if (key === date + "_" + memberId + "_noshow" && attendance[key]) {
               history.push({
                 date: date,
+                type: "당일불참",
+                reason: attendance[reasonKey] || "사유 미입력",
+              });
+            }
+            // 일반불참 매칭 조건 (noshow 플래그가 없는 순수 absent 상태일 때)
+            else if (
+              key === date + "_" + memberId &&
+              attendance[key] === "absent" &&
+              !attendance[date + "_" + memberId + "_noshow"]
+            ) {
+              history.push({
+                date: date,
+                type: "일반불참",
                 reason: attendance[reasonKey] || "사유 미입력",
               });
             }
           });
-          return history.sort((a, b) => b.date.localeCompare(a.date));
+          // 중복을 제거하고 날짜 최신순 정렬
+          const uniqueHistory = [];
+          const visitedDates = {};
+          history.forEach((item) => {
+            if (!visitedDates[item.date + "_" + item.type]) {
+              visitedDates[item.date + "_" + item.type] = true;
+              uniqueHistory.push(item);
+            }
+          });
+          return uniqueHistory.sort((a, b) => b.date.localeCompare(a.date));
         };
 
-        // 랭킹 정렬 (문제가 되었던 ?. 기호를 완벽하게 제거)
         const sortedMembersByRanking = useMemo(() => {
           return [...members].sort((a, b) => {
             const scoreA = (stats[a.id] && stats[a.id].total) || 0;
@@ -284,7 +326,7 @@
           });
         }, [members, stats]);
 
-        // 출석 버튼 핸들러
+        // 출석 버튼 제어 핸들러 (토글 기능 및 사유 연동 적용)
         const handleStatus = async (mId, status) => {
           if (!user) return;
           const { db, appId: fbAppId } = window.FB_TOOLS;
@@ -292,20 +334,20 @@
           const noshowKey = baseKey + "_noshow";
           const reasonKey = baseKey + "_reason";
 
-          if (status === "no-show") {
-            setReasonModal({
-              isOpen: true,
-              memberId: mId,
-              reason: attendance[reasonKey] || "",
-            });
-          } else {
+          const isNoshowCurrently = !!attendance[noshowKey];
+          const currentEffectiveStatus = isNoshowCurrently
+            ? "no-show"
+            : attendance[baseKey];
+
+          // 1. 토글 기능: 현재 켜져있는 버튼을 다시 누르면 데이터 초기화(해제)
+          if (currentEffectiveStatus === status) {
             if (db) {
               const batch = db.batch();
               batch.set(
                 db.doc(
                   "artifacts/" + fbAppId + "/public/data/attendance/" + baseKey,
                 ),
-                { value: status },
+                { value: null },
               );
               batch.set(
                 db.doc(
@@ -329,34 +371,33 @@
             } else {
               setAttendance((prev) => {
                 const next = Object.assign({}, prev);
-                next[baseKey] = status;
+                next[baseKey] = null;
                 next[noshowKey] = false;
                 next[reasonKey] = "";
                 return next;
               });
             }
+            return;
           }
-        };
 
-        // 사유 최종 저장
-        const saveReason = async () => {
-          const { memberId, reason } = reasonModal;
-          if (!memberId || !user) return;
-
-          const { db, appId: fbAppId } = window.FB_TOOLS;
-          const baseKey = selectedDate + "_" + memberId;
-          const noshowKey = baseKey + "_noshow";
-          const reasonKey = baseKey + "_reason";
-          const text = reason.trim() || "개인 사정";
-
-          try {
+          // 2. 사유 입력이 필요한 상태 변화 분기문 (불참 또는 당일불참)
+          if (status === "absent" || status === "no-show") {
+            setReasonModal({
+              isOpen: true,
+              memberId: mId,
+              type: status,
+              reason: attendance[reasonKey] || "",
+            });
+          }
+          // 3. 참석 상태로 변경 시 데이터 클리어 처리
+          else if (status === "present") {
             if (db) {
               const batch = db.batch();
               batch.set(
                 db.doc(
                   "artifacts/" + fbAppId + "/public/data/attendance/" + baseKey,
                 ),
-                { value: "absent" },
+                { value: "present" },
               );
               batch.set(
                 db.doc(
@@ -365,7 +406,62 @@
                     "/public/data/attendance/" +
                     noshowKey,
                 ),
-                { value: true },
+                { value: false },
+              );
+              batch.set(
+                db.doc(
+                  "artifacts/" +
+                    fbAppId +
+                    "/public/data/attendance/" +
+                    reasonKey,
+                ),
+                { value: "" },
+              );
+              await batch.commit();
+            } else {
+              setAttendance((prev) => {
+                const next = Object.assign({}, prev);
+                next[baseKey] = "present";
+                next[noshowKey] = false;
+                next[reasonKey] = "";
+                return next;
+              });
+            }
+          }
+        };
+
+        // 사유 모달 제출 저장 연동
+        const saveReason = async () => {
+          const { memberId, type, reason } = reasonModal;
+          if (!memberId || !user) return;
+
+          const { db, appId: fbAppId } = window.FB_TOOLS;
+          const baseKey = selectedDate + "_" + memberId;
+          const noshowKey = baseKey + "_noshow";
+          const reasonKey = baseKey + "_reason";
+          const text = reason.trim() || "개인 사정";
+
+          // 상태 유형별 플래그 분기
+          const targetStatusValue = "absent";
+          const targetNoshowValue = type === "no-show";
+
+          try {
+            if (db) {
+              const batch = db.batch();
+              batch.set(
+                db.doc(
+                  "artifacts/" + fbAppId + "/public/data/attendance/" + baseKey,
+                ),
+                { value: targetStatusValue },
+              );
+              batch.set(
+                db.doc(
+                  "artifacts/" +
+                    fbAppId +
+                    "/public/data/attendance/" +
+                    noshowKey,
+                ),
+                { value: targetNoshowValue },
               );
               batch.set(
                 db.doc(
@@ -380,13 +476,18 @@
             } else {
               setAttendance((prev) => {
                 const next = Object.assign({}, prev);
-                next[baseKey] = "absent";
-                next[noshowKey] = true;
+                next[baseKey] = targetStatusValue;
+                next[noshowKey] = targetNoshowValue;
                 next[reasonKey] = text;
                 return next;
               });
             }
-            setReasonModal({ isOpen: false, memberId: null, reason: "" });
+            setReasonModal({
+              isOpen: false,
+              memberId: null,
+              type: "",
+              reason: "",
+            });
           } catch (err) {
             setErrorMessage("사유 저장 실패");
           }
@@ -453,7 +554,7 @@
               </div>
             )}
 
-            {/* 오리지널 고유 시각디자인 헤더 파란색 배경 복구 완료 */}
+            {/* 시각디자인 헤더 파란색 배경 */}
             <header className="bg-blue-600 p-6 pt-12 rounded-b-[2.5rem] shadow-lg text-white">
               <div className="flex justify-between items-center mb-6">
                 <div>
@@ -526,9 +627,18 @@
                   {members.map((m) => {
                     const isNoshow =
                       !!attendance[selectedDate + "_" + m.id + "_noshow"];
-                    const currentStatus = isNoshow
-                      ? "no-show"
-                      : attendance[selectedDate + "_" + m.id];
+                    const isAbsent =
+                      attendance[selectedDate + "_" + m.id] === "absent";
+
+                    // 결합 상태 파악
+                    let currentStatus = null;
+                    if (isNoshow) currentStatus = "no-show";
+                    else if (isAbsent) currentStatus = "absent";
+                    else if (
+                      attendance[selectedDate + "_" + m.id] === "present"
+                    )
+                      currentStatus = "present";
+
                     const todayReason =
                       attendance[
                         selectedDate + "_" + m.id + "_reason__value"
@@ -568,7 +678,7 @@
                             label="불참"
                             score="0"
                             color="bg-slate-400"
-                            active={currentStatus === "absent" && !isNoshow}
+                            active={currentStatus === "absent"}
                             onClick={() => handleStatus(m.id, "absent")}
                           />
                           <StatusBtn
@@ -579,14 +689,18 @@
                             onClick={() => handleStatus(m.id, "no-show")}
                           />
                         </div>
-                        {isNoshow && todayReason && (
-                          <div className="text-[11px] bg-rose-50 text-rose-600 font-medium px-3 py-2 rounded-xl border border-rose-100">
-                            💬 사유:{" "}
-                            {typeof todayReason === "object"
-                              ? todayReason.value
-                              : todayReason}
-                          </div>
-                        )}
+                        {(currentStatus === "absent" ||
+                          currentStatus === "no-show") &&
+                          todayReason && (
+                            <div
+                              className={`text-[11px] font-medium px-3 py-2 rounded-xl border ${currentStatus === "no-show" ? "bg-rose-50 text-rose-600 border-rose-100" : "bg-slate-50 text-slate-600 border-slate-100"}`}
+                            >
+                              💬 사유:{" "}
+                              {typeof todayReason === "object"
+                                ? todayReason.value
+                                : todayReason}
+                            </div>
+                          )}
                       </div>
                     );
                   })}
@@ -618,18 +732,27 @@
                     const isExpanded = expandedMemberId === m.id;
                     const history = getAbsentHistory(m.id);
                     const rankScore = (stats[m.id] && stats[m.id].total) || 0;
-                    const pCount =
-                      (stats[m.id] && stats[m.id].presentCount) || 0;
+
+                    // 상세 정보 퍼센트 팩터 로드
+                    const mStats = stats[m.id] || {
+                      presentPct: "0.0",
+                      absentPct: "0.0",
+                      noshowPct: "0.0",
+                      totalDays: 0,
+                    };
 
                     return (
                       <div
                         key={m.id}
-                        onClick={() =>
-                          setExpandedMemberId(isExpanded ? null : m.id)
-                        }
-                        className={`flex flex-col bg-white rounded-[1.5rem] border transition-all cursor-pointer shadow-sm ${isExpanded ? "border-blue-500 ring-2 ring-blue-100" : "border-gray-100 hover:border-gray-200"}`}
+                        className={`flex flex-col bg-white rounded-[1.5rem] border transition-all shadow-sm ${isExpanded ? "border-blue-500 ring-2 ring-blue-100" : "border-gray-100 hover:border-gray-200"}`}
                       >
-                        <div className="flex items-center gap-4 p-5">
+                        {/* 상단 상자 요약 링크 클릭 영역 */}
+                        <div
+                          onClick={() =>
+                            setExpandedMemberId(isExpanded ? null : m.id)
+                          }
+                          className="flex items-center gap-4 p-5 cursor-pointer"
+                        >
                           <div
                             className={`w-12 h-12 rounded-2xl flex items-center justify-center font-black text-xl shadow-sm ${i === 0 ? "bg-yellow-400 text-white shadow-lg" : i === 1 ? "bg-slate-300 text-white" : i === 2 ? "bg-orange-300 text-white" : "bg-gray-50 text-gray-400"}`}
                           >
@@ -640,7 +763,7 @@
                               {m.name}
                             </div>
                             <div className="text-[10px] text-gray-400 font-bold uppercase mt-1 tracking-tighter">
-                              Played {pCount} Match(es)
+                              Played {mStats.present} Match(es)
                             </div>
                           </div>
                           <div
@@ -650,34 +773,106 @@
                           </div>
                         </div>
 
+                        {/* 클릭 시 확장되는 과거 누적 사유 및 상태 비율 통계 상세 페이지 */}
                         {isExpanded && (
-                          <div className="bg-slate-50 rounded-b-[1.5rem] p-4 pt-0 border-t border-gray-100 space-y-2 text-xs">
-                            <div className="font-bold text-rose-500 pt-3 flex items-center gap-1">
-                              🚨 당일불참 사유 기록
-                            </div>
-                            {history.length > 0 ? (
-                              <div className="space-y-1.5 max-h-40 overflow-y-auto no-scrollbar">
-                                {history.map((h, idx) => (
-                                  <div
-                                    key={idx}
-                                    className="bg-white p-2.5 rounded-xl border border-gray-100 flex flex-col gap-0.5 shadow-2xs"
-                                  >
-                                    <span className="font-mono text-[10px] text-gray-400 font-bold">
-                                      {h.date}
-                                    </span>
-                                    <span className="text-gray-700 font-medium">
-                                      {typeof h.reason === "object"
-                                        ? h.reason.value
-                                        : h.reason}
+                          <div className="bg-slate-50 rounded-b-[1.5rem] p-4 border-t border-gray-100 space-y-4 text-xs">
+                            {/* 1. 개인 기록 상세 출석 비율 통계 바 */}
+                            <div className="space-y-2 bg-white p-3.5 rounded-2xl border border-gray-100 shadow-3xs">
+                              <div className="font-bold text-gray-700 text-[11px] uppercase tracking-wider flex items-center gap-1">
+                                📊 개인 활동 통계 비율
+                              </div>
+                              <div className="space-y-2 pt-1">
+                                <div>
+                                  <div className="flex justify-between font-bold text-[10px] text-slate-500 mb-1">
+                                    <span>참석률</span>
+                                    <span className="text-emerald-500">
+                                      {mStats.presentPct}%
                                     </span>
                                   </div>
-                                ))}
+                                  <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                                    <div
+                                      className="bg-emerald-500 h-full"
+                                      style={{ width: mStats.presentPct + "%" }}
+                                    ></div>
+                                  </div>
+                                </div>
+                                <div>
+                                  <div className="flex justify-between font-bold text-[10px] text-slate-500 mb-1">
+                                    <span>일반불참률</span>
+                                    <span className="text-slate-500">
+                                      {mStats.absentPct}%
+                                    </span>
+                                  </div>
+                                  <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                                    <div
+                                      className="bg-slate-400 h-full"
+                                      style={{ width: mStats.absentPct + "%" }}
+                                    ></div>
+                                  </div>
+                                </div>
+                                <div>
+                                  <div className="flex justify-between font-bold text-[10px] text-slate-500 mb-1">
+                                    <span>당일불참률</span>
+                                    <span className="text-rose-500">
+                                      {mStats.noshowPct}%
+                                    </span>
+                                  </div>
+                                  <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                                    <div
+                                      className="bg-rose-500 h-full"
+                                      style={{ width: mStats.noshowPct + "%" }}
+                                    ></div>
+                                  </div>
+                                </div>
                               </div>
-                            ) : (
-                              <p className="text-gray-400 italic py-1">
-                                당일불참 기록이 없는 성실한 회원입니다! 👍
-                              </p>
-                            )}
+                            </div>
+
+                            {/* 2. 누적 사유 히스토리 타임라인 ([일반불참], [당일불참] 헤더 텍스트 고정) */}
+                            <div className="space-y-2">
+                              <div className="font-bold text-slate-700 text-[11px] uppercase tracking-wider flex items-center gap-1">
+                                📋 불참 누적 사유 기록
+                              </div>
+                              {history.length > 0 ? (
+                                <div className="space-y-1.5 max-h-40 overflow-y-auto no-scrollbar">
+                                  {history.map((h, idx) => (
+                                    <div
+                                      key={idx}
+                                      className="bg-white p-2.5 rounded-xl border border-gray-100 flex flex-col gap-1 shadow-3xs"
+                                    >
+                                      <div className="flex justify-between items-center">
+                                        <span className="font-mono text-[10px] text-gray-400 font-bold">
+                                          {h.date}
+                                        </span>
+                                        <span
+                                          className={`text-[9px] font-black px-1.5 py-0.5 rounded ${h.type === "당일불참" ? "bg-rose-50 text-rose-600" : "bg-slate-100 text-slate-600"}`}
+                                        >
+                                          {h.type}
+                                        </span>
+                                      </div>
+                                      <span className="text-gray-700 font-medium text-[11px]">
+                                        <strong
+                                          className={
+                                            h.type === "당일불참"
+                                              ? "text-rose-500"
+                                              : "text-slate-500"
+                                          }
+                                        >
+                                          [{h.type}]
+                                        </strong>{" "}
+                                        {typeof h.reason === "object"
+                                          ? h.reason.value
+                                          : h.reason}
+                                      </span>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <p className="text-gray-400 italic py-1 pl-1">
+                                  불참 기록이 전혀 없는 출석 만점의 모범
+                                  회원입니다! 👍
+                                </p>
+                              )}
+                            </div>
                           </div>
                         )}
                       </div>
@@ -687,13 +882,17 @@
               )}
             </main>
 
-            {/* 당일불참 사유 모달 */}
+            {/* 불참 및 당일불참 사유 공용 등록 팝업 모달 */}
             {reasonModal.isOpen && (
               <div className="fixed inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4 z-50">
-                <div className="bg-white w-full max-w-sm rounded-3xl p-5 shadow-2xl space-y-4">
+                <div className="bg-white w-full max-w-sm rounded-3xl p-5 shadow-2xl space-y-4 animate-in fade-in zoom-in-95 duration-150">
                   <div>
-                    <h3 className="text-base font-black text-gray-800">
-                      🚨 당일불참 사유 등록
+                    <h3
+                      className={`text-base font-black ${reasonModal.type === "no-show" ? "text-rose-500" : "text-slate-700"}`}
+                    >
+                      {reasonModal.type === "no-show"
+                        ? "🚨 당일불참 사유 등록"
+                        : "📋 일반불참 사유 등록"}
                     </h3>
                     <p className="text-xs text-gray-400 mt-1 font-semibold">
                       선택된 날짜: {selectedDate}
@@ -701,7 +900,7 @@
                   </div>
                   <textarea
                     rows="3"
-                    placeholder="구체적인 사유를 적어주세요. (예: 당일 야근, 갑작스러운 부상 등)"
+                    placeholder="구체적인 사유를 적어주세요. (예: 급한 야근, 부상, 출장 등)"
                     value={reasonModal.reason}
                     onChange={(e) =>
                       setReasonModal(
@@ -719,6 +918,7 @@
                         setReasonModal({
                           isOpen: false,
                           memberId: null,
+                          type: "",
                           reason: "",
                         })
                       }
@@ -729,7 +929,7 @@
                     <button
                       type="button"
                       onClick={saveReason}
-                      className="py-2.5 bg-rose-500 hover:bg-rose-600 text-white font-bold rounded-2xl text-xs transition shadow-lg shadow-rose-100"
+                      className={`py-2.5 text-white font-bold rounded-2xl text-xs transition shadow-lg ${reasonModal.type === "no-show" ? "bg-rose-500 hover:bg-rose-600 shadow-rose-100" : "bg-slate-600 hover:bg-slate-700 shadow-slate-100"}`}
                     >
                       사유 저장하기
                     </button>
