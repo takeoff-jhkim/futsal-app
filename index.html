@@ -8,6 +8,7 @@
     />
     <title>도라꾸FC 출석부</title>
 
+    <!-- PWA Settings -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta
       name="apple-mobile-web-app-status-bar-style"
@@ -20,18 +21,20 @@
       href="https://cdn-icons-png.flaticon.com/512/5323/5323977.png"
     />
 
+    <!-- 404 Favicon 에러 방지 -->
     <link
       rel="icon"
       href="data:;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
     />
 
+    <!-- Libraries -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-
     <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/6.26.0/babel.min.js"></script>
 
+    <!-- Firebase 호환성(Compat) 라이브러리 -->
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
@@ -122,6 +125,7 @@
       const App = () => {
         const [fbStatus, setFbStatus] = useState("waiting");
         const [user, setUser] = useState(null);
+        const [isActualAdmin, setIsActualAdmin] = useState(false); // 실제 이메일 인증된 관리자 여부 플래그
         const [members, setMembers] = useState([]);
         const [attendance, setAttendance] = useState({});
         const [selectedDate, setSelectedDate] = useState(
@@ -132,16 +136,21 @@
         const [isInitialLoading, setIsInitialLoading] = useState(true);
         const [errorMessage, setErrorMessage] = useState(null);
 
-        // 사유 수집용 모달 상태 (type: 'absent' 또는 'no-show')
+        // 모달 전용 상태들
         const [reasonModal, setReasonModal] = useState({
           isOpen: false,
           memberId: null,
           type: "",
           reason: "",
         });
+        const [loginModal, setLoginModal] = useState({
+          isOpen: false,
+          email: "",
+          password: "",
+        });
         const [expandedMemberId, setExpandedMemberId] = useState(null);
 
-        // Firebase 인증 감지
+        // Firebase Auth 상태 변화 감지
         useEffect(() => {
           const timer = setInterval(() => {
             if (window.FB_TOOLS) {
@@ -152,14 +161,26 @@
               if (!auth) {
                 setFbStatus("local");
                 setUser({ uid: "local-user" });
+                setIsActualAdmin(true); // 로컬모드는 테스트 편의상 전체허용
                 setIsInitialLoading(false);
                 return;
               }
 
               setFbStatus("ready");
-              signInAnonymously().catch(() => setErrorMessage("인증 실패"));
+
+              // 로그인 상태 실시간 추적 감지 수동 바인딩
               onAuthStateChanged(auth, (u) => {
                 setUser(u);
+                if (u && !u.isAnonymous) {
+                  setIsActualAdmin(true); // 이메일 로그인 시 관리자 권한 ON
+                } else {
+                  setIsActualAdmin(false); // 익명 계정은 일반 회원 권한
+                  if (!u) {
+                    signInAnonymously().catch(() =>
+                      setErrorMessage("기본 회원 인증 실패"),
+                    );
+                  }
+                }
               });
             }
           }, 200);
@@ -172,8 +193,8 @@
           const { db, appId: fbAppId } = window.FB_TOOLS;
 
           if (!db) {
-            const m = localStorage.getItem("futsal_members_v18");
-            const a = localStorage.getItem("futsal_attendance_v18");
+            const m = localStorage.getItem("futsal_members_v19");
+            const a = localStorage.getItem("futsal_attendance_v19");
             if (m) setMembers(JSON.parse(m));
             if (a) setAttendance(JSON.parse(a));
             setIsInitialLoading(false);
@@ -214,16 +235,61 @@
         // 로컬 자동 백업 및 아이콘 동기화
         useEffect(() => {
           if (fbStatus === "local" && !isInitialLoading) {
-            localStorage.setItem("futsal_members_v18", JSON.stringify(members));
+            localStorage.setItem("futsal_members_v19", JSON.stringify(members));
             localStorage.setItem(
-              "futsal_attendance_v18",
+              "futsal_attendance_v19",
               JSON.stringify(attendance),
             );
           }
           if (window.lucide) lucide.createIcons();
-        }, [members, attendance, isInitialLoading, activeTab, fbStatus]);
+        }, [
+          members,
+          attendance,
+          isInitialLoading,
+          activeTab,
+          fbStatus,
+          isActualAdmin,
+        ]);
 
-        // 통합 통계 및 점수 계산 구조
+        // 관리자 이메일 로그인 처리
+        const handleAdminLoginSubmit = async (e) => {
+          e.preventDefault();
+          if (!loginModal.email.trim() || !loginModal.password.trim()) return;
+
+          try {
+            setIsInitialLoading(true);
+            await firebase
+              .auth()
+              .signInWithEmailAndPassword(
+                loginModal.email.trim(),
+                loginModal.password.trim(),
+              );
+            setLoginModal({ isOpen: false, email: "", password: "" });
+            alert("관리자 인증 성공! 출석부 수정 권한이 부여되었습니다. 🔓");
+          } catch (err) {
+            alert(
+              "로그인 실패: 계정 정보가 정확하지 않거나 관리자 계정이 아닙니다.",
+            );
+          } finally {
+            setIsInitialLoading(false);
+          }
+        };
+
+        // 관리자 로그아웃 처리 (다시 익명 일반회원으로 강등)
+        const handleAdminLogout = async () => {
+          if (!confirm("관리자 모드를 종료하고 로그아웃 하시겠습니까?")) return;
+          try {
+            setIsInitialLoading(true);
+            await firebase.auth().signOut();
+            alert("로그아웃 되었습니다. 조회 전용 모드로 전환합니다. 🔒");
+          } catch (err) {
+            setErrorMessage("로그아웃 실패");
+          } finally {
+            setIsInitialLoading(false);
+          }
+        };
+
+        // 점수 계산 팩터
         const stats = useMemo(() => {
           const res = {};
           members.forEach((m) => {
@@ -259,7 +325,6 @@
               absent: absentCount,
               noshow: noshowCount,
               totalDays: totalActiveDays,
-              // 상태별 퍼센트 계산 (경기 기록이 있을 때만 계산)
               presentPct:
                 totalActiveDays > 0
                   ? ((presentCount / totalActiveDays) * 100).toFixed(1)
@@ -277,23 +342,20 @@
           return res;
         }, [members, attendance]);
 
-        // 과거 불참 및 당일불참 모든 통합 히스토리 파싱
+        // 불참 통합 히스토리 파싱
         const getAbsentHistory = (memberId) => {
           const history = [];
           Object.keys(attendance).forEach((key) => {
             const date = key.split("_")[0];
             const reasonKey = date + "_" + memberId + "_reason";
 
-            // 당일불참 매칭 조건
             if (key === date + "_" + memberId + "_noshow" && attendance[key]) {
               history.push({
                 date: date,
                 type: "당일불참",
                 reason: attendance[reasonKey] || "사유 미입력",
               });
-            }
-            // 일반불참 매칭 조건 (noshow 플래그가 없는 순수 absent 상태일 때)
-            else if (
+            } else if (
               key === date + "_" + memberId &&
               attendance[key] === "absent" &&
               !attendance[date + "_" + memberId + "_noshow"]
@@ -305,7 +367,6 @@
               });
             }
           });
-          // 중복을 제거하고 날짜 최신순 정렬
           const uniqueHistory = [];
           const visitedDates = {};
           history.forEach((item) => {
@@ -326,9 +387,9 @@
           });
         }, [members, stats]);
 
-        // 출석 버튼 제어 핸들러 (토글 기능 및 사유 연동 적용)
+        // 출석 토글 핸들러
         const handleStatus = async (mId, status) => {
-          if (!user) return;
+          if (!isActualAdmin) return; // 관리자가 아니면 권한 거부 및 무반응 처리
           const { db, appId: fbAppId } = window.FB_TOOLS;
           const baseKey = selectedDate + "_" + mId;
           const noshowKey = baseKey + "_noshow";
@@ -339,7 +400,6 @@
             ? "no-show"
             : attendance[baseKey];
 
-          // 1. 토글 기능: 현재 켜져있는 버튼을 다시 누르면 데이터 초기화(해제)
           if (currentEffectiveStatus === status) {
             if (db) {
               const batch = db.batch();
@@ -380,7 +440,6 @@
             return;
           }
 
-          // 2. 사유 입력이 필요한 상태 변화 분기문 (불참 또는 당일불참)
           if (status === "absent" || status === "no-show") {
             setReasonModal({
               isOpen: true,
@@ -388,9 +447,7 @@
               type: status,
               reason: attendance[reasonKey] || "",
             });
-          }
-          // 3. 참석 상태로 변경 시 데이터 클리어 처리
-          else if (status === "present") {
+          } else if (status === "present") {
             if (db) {
               const batch = db.batch();
               batch.set(
@@ -430,10 +487,10 @@
           }
         };
 
-        // 사유 모달 제출 저장 연동
+        // 사유 제출 저장
         const saveReason = async () => {
           const { memberId, type, reason } = reasonModal;
-          if (!memberId || !user) return;
+          if (!memberId || !isActualAdmin) return;
 
           const { db, appId: fbAppId } = window.FB_TOOLS;
           const baseKey = selectedDate + "_" + memberId;
@@ -441,7 +498,6 @@
           const reasonKey = baseKey + "_reason";
           const text = reason.trim() || "개인 사정";
 
-          // 상태 유형별 플래그 분기
           const targetStatusValue = "absent";
           const targetNoshowValue = type === "no-show";
 
@@ -495,7 +551,7 @@
 
         const addMember = async (e) => {
           e.preventDefault();
-          if (!newName.trim() || !user) return;
+          if (!newName.trim() || !isActualAdmin) return;
           const { db, appId: fbAppId } = window.FB_TOOLS;
           const id = Date.now().toString();
           try {
@@ -513,6 +569,7 @@
         };
 
         const removeMember = async (id) => {
+          if (!isActualAdmin) return;
           if (!confirm("삭제하시겠습니까?")) return;
           const { db, appId: fbAppId } = window.FB_TOOLS;
           try {
@@ -534,7 +591,7 @@
               <div className="flex flex-col items-center">
                 <div className="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-4"></div>
                 <p className="text-gray-400 text-sm font-medium">
-                  데이터 로드 중...
+                  데이터 허가 체크 중...
                 </p>
               </div>
             </div>
@@ -563,17 +620,36 @@
                   </h1>
                   <div className="flex items-center gap-1.5 mt-2 opacity-70">
                     <div
-                      className={`w-1.5 h-1.5 rounded-full ${window.FB_TOOLS.db ? "bg-green-400 animate-pulse" : "bg-orange-400"}`}
+                      className={`w-1.5 h-1.5 rounded-full ${isActualAdmin ? "bg-green-400 animate-pulse" : "bg-sky-300"}`}
                     ></div>
                     <p className="text-[10px] font-bold uppercase tracking-widest leading-none">
-                      {window.FB_TOOLS.db ? "Cloud Sync" : "Local Mode"}
+                      {isActualAdmin ? "Admin Mode" : "View Only Mode"}
                     </p>
                   </div>
                 </div>
-                <div className="bg-white/10 p-2.5 rounded-2xl">
-                  <i data-lucide="settings" className="w-5 h-5 text-white"></i>
-                </div>
+
+                {/* 우측 관리자 자물쇠 버튼 토글 제어 구역 */}
+                {isActualAdmin ? (
+                  <button
+                    onClick={handleAdminLogout}
+                    className="bg-emerald-500 text-white p-2.5 rounded-2xl border border-emerald-400 shadow-md flex items-center justify-center"
+                  >
+                    <i data-lucide="lock-open" className="w-5 h-5"></i>
+                  </button>
+                ) : (
+                  <button
+                    onClick={() =>
+                      setLoginModal(
+                        Object.assign({}, loginModal, { isOpen: true }),
+                      )
+                    }
+                    className="bg-white/10 hover:bg-white/20 text-white p-2.5 rounded-2xl flex items-center justify-center transition-all"
+                  >
+                    <i data-lucide="lock" className="w-5 h-5"></i>
+                  </button>
+                )}
               </div>
+
               <div className="bg-white rounded-2xl p-4 flex items-center gap-4 text-gray-800 shadow-inner">
                 <i data-lucide="calendar" className="text-blue-600 w-6 h-6"></i>
                 <div className="flex-1">
@@ -582,9 +658,10 @@
                   </p>
                   <input
                     type="date"
+                    disabled={!isActualAdmin}
                     value={selectedDate}
                     onChange={(e) => setSelectedDate(e.target.value)}
-                    className="font-black outline-none w-full text-lg appearance-none bg-transparent"
+                    className="font-black outline-none w-full text-lg appearance-none bg-transparent disabled:opacity-80"
                   />
                 </div>
               </div>
@@ -609,7 +686,7 @@
               {activeTab === "attendance" ? (
                 <div className="space-y-4">
                   <div className="flex justify-between items-center px-1 text-[10px] font-black text-gray-400 uppercase tracking-widest">
-                    <span>Member List</span>
+                    <span>Member List {!isActualAdmin && "(조회 전용)"}</span>
                     <span className="text-blue-600 bg-blue-50 px-2 py-0.5 rounded-md">
                       참석:{" "}
                       {
@@ -624,121 +701,139 @@
                     </span>
                   </div>
 
-                  {members.map((m) => {
-                    const isNoshow =
-                      !!attendance[selectedDate + "_" + m.id + "_noshow"];
-                    const isAbsent =
-                      attendance[selectedDate + "_" + m.id] === "absent";
-
-                    // 결합 상태 파악
-                    let currentStatus = null;
-                    if (isNoshow) currentStatus = "no-show";
-                    else if (isAbsent) currentStatus = "absent";
-                    else if (
-                      attendance[selectedDate + "_" + m.id] === "present"
-                    )
-                      currentStatus = "present";
-
-                    const todayReason =
-                      attendance[
-                        selectedDate + "_" + m.id + "_reason__value"
-                      ] || attendance[selectedDate + "_" + m.id + "_reason"];
-                    const mScore = (stats[m.id] && stats[m.id].total) || 0;
-
-                    return (
-                      <div
-                        key={m.id}
-                        className="bg-white border border-gray-100 rounded-[1.5rem] p-4 shadow-sm space-y-3"
-                      >
-                        <div className="flex justify-between items-center px-1">
-                          <div className="flex flex-col">
-                            <span className="font-black text-gray-800 text-lg leading-none">
-                              {m.name}
-                            </span>
-                            <span className="text-[10px] text-blue-500 font-bold mt-1.5 italic">
-                              Score: {mScore}pt
-                            </span>
-                          </div>
-                          <button
-                            onClick={() => removeMember(m.id)}
-                            className="p-2 text-gray-200 hover:text-red-400 transition-colors"
-                          >
-                            <i data-lucide="trash-2" className="w-4 h-4"></i>
-                          </button>
-                        </div>
-                        <div className="grid grid-cols-3 gap-2">
-                          <StatusBtn
-                            label="참석"
-                            score="+1"
-                            color="bg-emerald-500"
-                            active={currentStatus === "present"}
-                            onClick={() => handleStatus(m.id, "present")}
-                          />
-                          <StatusBtn
-                            label="불참"
-                            score="0"
-                            color="bg-slate-400"
-                            active={currentStatus === "absent"}
-                            onClick={() => handleStatus(m.id, "absent")}
-                          />
-                          <StatusBtn
-                            label="당일불참"
-                            score="-1"
-                            color="bg-rose-500"
-                            active={currentStatus === "no-show"}
-                            onClick={() => handleStatus(m.id, "no-show")}
-                          />
-                        </div>
-                        {(currentStatus === "absent" ||
-                          currentStatus === "no-show") &&
-                          todayReason && (
-                            <div
-                              className={`text-[11px] font-medium px-3 py-2 rounded-xl border ${currentStatus === "no-show" ? "bg-rose-50 text-rose-600 border-rose-100" : "bg-slate-50 text-slate-600 border-slate-100"}`}
-                            >
-                              💬 사유:{" "}
-                              {typeof todayReason === "object"
-                                ? todayReason.value
-                                : todayReason}
-                            </div>
-                          )}
-                      </div>
-                    );
-                  })}
-
-                  <form
-                    onSubmit={addMember}
-                    className="mt-8 p-4 bg-slate-100 rounded-3xl border-2 border-dashed border-slate-200 flex gap-3 focus-within:border-blue-400 transition-all"
+                  {/* 일반 회원일 땐 출석 탭 영역 전체에 불투명 오버레이를 주거나 비활성화 느낌을 적용 */}
+                  <div
+                    className={
+                      "space-y-4 " +
+                      (!isActualAdmin ? "opacity-75 pointer-events-none" : "")
+                    }
                   >
-                    <input
-                      value={newName}
-                      onChange={(e) => setNewName(e.target.value)}
-                      placeholder="이름 입력"
-                      className="flex-1 bg-transparent outline-none text-sm font-bold text-gray-600"
-                    />
-                    <button
-                      type="submit"
-                      className="bg-blue-600 text-white p-2.5 rounded-2xl shadow-lg"
+                    {members.map((m) => {
+                      const isNoshow =
+                        !!attendance[selectedDate + "_" + m.id + "_noshow"];
+                      const isAbsent =
+                        attendance[selectedDate + "_" + m.id] === "absent";
+
+                      let currentStatus = null;
+                      if (isNoshow) currentStatus = "no-show";
+                      else if (isAbsent) currentStatus = "absent";
+                      else if (
+                        attendance[selectedDate + "_" + m.id] === "present"
+                      )
+                        currentStatus = "present";
+
+                      const todayReason =
+                        attendance[
+                          selectedDate + "_" + m.id + "_reason__value"
+                        ] || attendance[selectedDate + "_" + m.id + "_reason"];
+                      const mScore = (stats[m.id] && stats[m.id].total) || 0;
+
+                      return (
+                        <div
+                          key={m.id}
+                          className="bg-white border border-gray-100 rounded-[1.5rem] p-4 shadow-sm space-y-3"
+                        >
+                          <div className="flex justify-between items-center px-1">
+                            <div className="flex flex-col">
+                              <span className="font-black text-gray-800 text-lg leading-none">
+                                {m.name}
+                              </span>
+                              <span className="text-[10px] text-blue-500 font-bold mt-1.5 italic">
+                                Score: {mScore}pt
+                              </span>
+                            </div>
+                            {isActualAdmin && (
+                              <button
+                                onClick={() => removeMember(m.id)}
+                                className="p-2 text-gray-200 hover:text-red-400 transition-colors"
+                              >
+                                <i
+                                  data-lucide="trash-2"
+                                  className="w-4 h-4"
+                                ></i>
+                              </button>
+                            )}
+                          </div>
+                          <div className="grid grid-cols-3 gap-2">
+                            <StatusBtn
+                              label="참석"
+                              score="+1"
+                              color="bg-emerald-500"
+                              active={currentStatus === "present"}
+                              onClick={() => handleStatus(m.id, "present")}
+                            />
+                            <StatusBtn
+                              label="불참"
+                              score="0"
+                              color="bg-slate-400"
+                              active={currentStatus === "absent"}
+                              onClick={() => handleStatus(m.id, "absent")}
+                            />
+                            <StatusBtn
+                              label="당일불참"
+                              score="-1"
+                              color="bg-rose-500"
+                              active={currentStatus === "no-show"}
+                              onClick={() => handleStatus(m.id, "no-show")}
+                            />
+                          </div>
+                          {(currentStatus === "absent" ||
+                            currentStatus === "no-show") &&
+                            todayReason && (
+                              <div
+                                className={`text-[11px] font-medium px-3 py-2 rounded-xl border ${currentStatus === "no-show" ? "bg-rose-50 text-rose-600 border-rose-100" : "bg-slate-50 text-slate-600 border-slate-100"}`}
+                              >
+                                💬 사유:{" "}
+                                {typeof todayReason === "object"
+                                  ? todayReason.value
+                                  : todayReason}
+                              </div>
+                            )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {isActualAdmin ? (
+                    <form
+                      onSubmit={addMember}
+                      className="mt-8 p-4 bg-slate-100 rounded-3xl border-2 border-dashed border-slate-200 flex gap-3 focus-within:border-blue-400 transition-all"
                     >
-                      <i data-lucide="plus" className="w-6 h-6"></i>
-                    </button>
-                  </form>
+                      <input
+                        value={newName}
+                        onChange={(e) => setNewName(e.target.value)}
+                        placeholder="이름 입력"
+                        className="flex-1 bg-transparent outline-none text-sm font-bold text-gray-600"
+                      />
+                      <button
+                        type="submit"
+                        className="bg-blue-600 text-white p-2.5 rounded-2xl shadow-lg"
+                      >
+                        <i data-lucide="plus" className="w-6 h-6"></i>
+                      </button>
+                    </form>
+                  ) : (
+                    <div className="text-center py-4 text-xs font-bold text-slate-400 bg-slate-50 border border-dashed rounded-2xl">
+                      🔒 관리자로 로그인하면 신규 명부를 등록할 수 있습니다.
+                    </div>
+                  )}
                 </div>
               ) : (
+                // 랭킹 영역 (일반회원도 100% 터치 및 아코디언 확장 정상 사용 가능)
                 <div className="space-y-3">
                   <h2 className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-4 px-1">
-                    Season Standings
+                    Season Standings (상세 터치 가능)
                   </h2>
                   {sortedMembersByRanking.map((m, i) => {
                     const isExpanded = expandedMemberId === m.id;
                     const history = getAbsentHistory(m.id);
                     const rankScore = (stats[m.id] && stats[m.id].total) || 0;
-
-                    // 상세 정보 퍼센트 팩터 로드
                     const mStats = stats[m.id] || {
                       presentPct: "0.0",
                       absentPct: "0.0",
                       noshowPct: "0.0",
                       totalDays: 0,
+                      present: 0,
                     };
 
                     return (
@@ -746,7 +841,6 @@
                         key={m.id}
                         className={`flex flex-col bg-white rounded-[1.5rem] border transition-all shadow-sm ${isExpanded ? "border-blue-500 ring-2 ring-blue-100" : "border-gray-100 hover:border-gray-200"}`}
                       >
-                        {/* 상단 상자 요약 링크 클릭 영역 */}
                         <div
                           onClick={() =>
                             setExpandedMemberId(isExpanded ? null : m.id)
@@ -773,10 +867,9 @@
                           </div>
                         </div>
 
-                        {/* 클릭 시 확장되는 과거 누적 사유 및 상태 비율 통계 상세 페이지 */}
                         {isExpanded && (
                           <div className="bg-slate-50 rounded-b-[1.5rem] p-4 border-t border-gray-100 space-y-4 text-xs">
-                            {/* 1. 개인 기록 상세 출석 비율 통계 바 */}
+                            {/* 통계 퍼센트(%) 표시 레이아웃 */}
                             <div className="space-y-2 bg-white p-3.5 rounded-2xl border border-gray-100 shadow-3xs">
                               <div className="font-bold text-gray-700 text-[11px] uppercase tracking-wider flex items-center gap-1">
                                 📊 개인 활동 통계 비율
@@ -827,7 +920,7 @@
                               </div>
                             </div>
 
-                            {/* 2. 누적 사유 히스토리 타임라인 ([일반불참], [당일불참] 헤더 텍스트 고정) */}
+                            {/* 머리말 구분이 포함된 사유 리스트 출력 섹션 */}
                             <div className="space-y-2">
                               <div className="font-bold text-slate-700 text-[11px] uppercase tracking-wider flex items-center gap-1">
                                 📋 불참 누적 사유 기록
@@ -868,8 +961,8 @@
                                 </div>
                               ) : (
                                 <p className="text-gray-400 italic py-1 pl-1">
-                                  불참 기록이 전혀 없는 출석 만점의 모범
-                                  회원입니다! 👍
+                                  불참 기록이 전혀 없는 신뢰의 만점 회원입니다!
+                                  👍
                                 </p>
                               )}
                             </div>
@@ -882,7 +975,78 @@
               )}
             </main>
 
-            {/* 불참 및 당일불참 사유 공용 등록 팝업 모달 */}
+            {/* 관리자 이메일 로그인 입력 팝업 모달 */}
+            {loginModal.isOpen && (
+              <div className="fixed inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+                <form
+                  onSubmit={handleAdminLoginSubmit}
+                  className="bg-white w-full max-w-sm rounded-3xl p-5 shadow-2xl space-y-4 animate-in fade-in zoom-in-95 duration-150"
+                >
+                  <div>
+                    <h3 className="text-base font-black text-blue-600 flex items-center gap-2">
+                      <i data-lucide="lock" className="w-5 h-5"></i> 관리자 권한
+                      인증
+                    </h3>
+                    <p className="text-xs text-gray-400 mt-1 font-semibold">
+                      도라꾸FC 운영진 계정으로 로그인해 주세요.
+                    </p>
+                  </div>
+                  <div className="space-y-2.5">
+                    <input
+                      type="email"
+                      required
+                      placeholder="관리자 이메일 주소"
+                      value={loginModal.email}
+                      onChange={(e) =>
+                        setLoginModal(
+                          Object.assign({}, loginModal, {
+                            email: e.target.value,
+                          }),
+                        )
+                      }
+                      className="w-full bg-gray-50 border border-gray-200 rounded-2xl p-3 text-xs font-semibold focus:outline-none focus:border-blue-500 text-gray-700"
+                    />
+                    <input
+                      type="password"
+                      required
+                      placeholder="비밀번호"
+                      value={loginModal.password}
+                      onChange={(e) =>
+                        setLoginModal(
+                          Object.assign({}, loginModal, {
+                            password: e.target.value,
+                          }),
+                        )
+                      }
+                      className="w-full bg-gray-50 border border-gray-200 rounded-2xl p-3 text-xs font-semibold focus:outline-none focus:border-blue-500 text-gray-700"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 pt-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setLoginModal({
+                          isOpen: false,
+                          email: "",
+                          password: "",
+                        })
+                      }
+                      className="py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-500 font-bold rounded-2xl text-xs transition"
+                    >
+                      취소
+                    </button>
+                    <button
+                      type="submit"
+                      className="py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-2xl text-xs transition shadow-lg shadow-blue-100"
+                    >
+                      로그인
+                    </button>
+                  </div>
+                </form>
+              </div>
+            )}
+
+            {/* 불참 및 당일불참 사유 등록 팝업 모달 */}
             {reasonModal.isOpen && (
               <div className="fixed inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4 z-50">
                 <div className="bg-white w-full max-w-sm rounded-3xl p-5 shadow-2xl space-y-4 animate-in fade-in zoom-in-95 duration-150">
