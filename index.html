@@ -8,7 +8,6 @@
     />
     <title>도라꾸FC 출석부</title>
 
-    <!-- PWA Settings -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta
       name="apple-mobile-web-app-status-bar-style"
@@ -21,20 +20,17 @@
       href="https://cdn-icons-png.flaticon.com/512/5323/5323977.png"
     />
 
-    <!-- 404 Favicon 에러 방지 -->
     <link
       rel="icon"
       href="data:;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
     />
 
-    <!-- Libraries -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/6.26.0/babel.min.js"></script>
 
-    <!-- Firebase 호환성(Compat) 라이브러리 -->
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
@@ -136,10 +132,9 @@
         const [isInitialLoading, setIsInitialLoading] = useState(true);
         const [errorMessage, setErrorMessage] = useState(null);
 
-        // 검색어 전용 상태값 추가
+        // 검색어 상태 관리 (출석부/랭킹 공용 사용 혹은 탭 전환 시 초기화 처리)
         const [searchTerm, setSearchTerm] = useState("");
 
-        // 사유 수집 및 인증 모달 상태
         const [reasonModal, setReasonModal] = useState({
           isOpen: false,
           memberId: null,
@@ -152,6 +147,11 @@
           password: "",
         });
         const [expandedMemberId, setExpandedMemberId] = useState(null);
+
+        // 탭 바뀔 때 검색어 깔끔하게 비워주기
+        useEffect(() => {
+          setSearchTerm("");
+        }, [activeTab]);
 
         // Firebase Auth 인증 상태 감지
         useEffect(() => {
@@ -194,8 +194,8 @@
           const { db, appId: fbAppId } = window.FB_TOOLS;
 
           if (!db) {
-            const m = localStorage.getItem("futsal_members_v23");
-            const a = localStorage.getItem("futsal_attendance_v23");
+            const m = localStorage.getItem("futsal_members_v25");
+            const a = localStorage.getItem("futsal_attendance_v25");
             if (m) setMembers(JSON.parse(m));
             if (a) setAttendance(JSON.parse(a));
             setIsInitialLoading(false);
@@ -236,9 +236,9 @@
         // 로컬 오토세이브 및 아이콘 매핑
         useEffect(() => {
           if (fbStatus === "local" && !isInitialLoading) {
-            localStorage.setItem("futsal_members_v23", JSON.stringify(members));
+            localStorage.setItem("futsal_members_v25", JSON.stringify(members));
             localStorage.setItem(
-              "futsal_attendance_v23",
+              "futsal_attendance_v25",
               JSON.stringify(attendance),
             );
           }
@@ -355,7 +355,7 @@
           return res;
         }, [members, attendance]);
 
-        // 검색 필터링이 반영된 멤버 리스트 파싱
+        // 출석부용 필터링 명부
         const filteredMembers = useMemo(() => {
           if (!searchTerm.trim()) return members;
           return members.filter(
@@ -368,25 +368,41 @@
           const history = [];
           Object.keys(attendance).forEach((key) => {
             const date = key.split("_")[0];
-            const reasonKey = date + "_" + memberId + "_reason";
 
-            if (key === date + "_" + memberId + "_noshow" && attendance[key]) {
+            if (
+              key === date + "_" + memberId + "_noshow" &&
+              attendance[key] === true
+            ) {
+              const reasonKey = date + "_" + memberId + "_reason";
+              const rawReason = attendance[reasonKey];
+              const cleanReason =
+                rawReason && typeof rawReason === "object"
+                  ? rawReason.value
+                  : rawReason;
+
               history.push({
                 date: date,
                 type: "당일불참",
-                reason: attendance[reasonKey] || "사유 미입력",
+                reason: cleanReason || "사유 미입력",
               });
             } else if (
               key === date + "_" + memberId &&
               attendance[key] === "absent" &&
               !attendance[date + "_" + memberId + "_noshow"]
             ) {
-              const normalReasonKey = date + "_" + memberId + "_absent_reason";
+              const absentReasonKey = date + "_" + memberId + "_absent_reason";
+              const reasonKey = date + "_" + memberId + "_reason";
+              const rawReason =
+                attendance[absentReasonKey] || attendance[reasonKey];
+              const cleanReason =
+                rawReason && typeof rawReason === "object"
+                  ? rawReason.value
+                  : rawReason;
+
               history.push({
                 date: date,
                 type: "일반불참",
-                reason:
-                  normalReasonKey || attendance[reasonKey] || "사유 미입력",
+                reason: cleanReason || "사유 미입력",
               });
             }
           });
@@ -402,6 +418,7 @@
           return uniqueHistory.sort((a, b) => b.date.localeCompare(a.date));
         };
 
+        // 🏆 점수 순서로 정렬된 기본 마스터 랭킹 리스트업
         const sortedMembersByRanking = useMemo(() => {
           return [...members].sort((a, b) => {
             const scoreA = (stats[a.id] && stats[a.id].total) || 0;
@@ -410,6 +427,14 @@
             return a.name.localeCompare(b.name, "ko");
           });
         }, [members, stats]);
+
+        // 🏆 🛠️ 랭킹용 실시간 필터링 리스트 추가
+        const filteredRankings = useMemo(() => {
+          if (!searchTerm.trim()) return sortedMembersByRanking;
+          return sortedMembersByRanking.filter(
+            (m) => m.name.indexOf(searchTerm.trim()) !== -1,
+          );
+        }, [sortedMembersByRanking, searchTerm]);
 
         // 중복 선택 및 상태 제어 출석 핸들러
         const handleStatus = async (mId, status) => {
@@ -619,7 +644,7 @@
               <div className="flex flex-col items-center">
                 <div className="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-4"></div>
                 <p className="text-gray-400 text-sm font-medium">
-                  레이아웃 세팅 중...
+                  데이터 바인딩 중...
                 </p>
               </div>
             </div>
@@ -710,31 +735,32 @@
             </nav>
 
             <main className="flex-1 px-6 pb-28 overflow-y-auto no-scrollbar">
+              {/* 🔍 공용 검색창 레이아웃 배치 구역 (출석부 탭, 랭킹 탭 둘 다 상단 노출) */}
+              <div className="mb-4 bg-slate-100 rounded-2xl px-4 py-2.5 flex items-center gap-3 border border-slate-200/60 focus-within:border-blue-400 focus-within:bg-white transition-all shadow-inner">
+                <i data-lucide="search" className="text-slate-400 w-4 h-4"></i>
+                <input
+                  type="text"
+                  placeholder={
+                    activeTab === "attendance"
+                      ? "이름으로 팀원 검색..."
+                      : "랭킹 순위표 이름 검색..."
+                  }
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="bg-transparent outline-none text-xs font-bold text-gray-700 w-full placeholder-slate-400"
+                />
+                {searchTerm && (
+                  <button
+                    onClick={() => setSearchTerm("")}
+                    className="text-slate-400 hover:text-slate-600"
+                  >
+                    <i data-lucide="x" className="w-3.5 h-3.5"></i>
+                  </button>
+                )}
+              </div>
+
               {activeTab === "attendance" ? (
                 <div className="space-y-4">
-                  {/* 🔍 실시간 이름 검색바 레이아웃 추가 구역 */}
-                  <div className="bg-slate-100 rounded-2xl px-4 py-2.5 flex items-center gap-3 border border-slate-200/60 focus-within:border-blue-400 focus-within:bg-white transition-all shadow-inner">
-                    <i
-                      data-lucide="search"
-                      className="text-slate-400 w-4 h-4"
-                    ></i>
-                    <input
-                      type="text"
-                      placeholder="이름으로 팀원 검색..."
-                      value={searchTerm}
-                      onChange={(e) => setSearchTerm(e.target.value)}
-                      className="bg-transparent outline-none text-xs font-bold text-gray-700 w-full placeholder-slate-400"
-                    />
-                    {searchTerm && (
-                      <button
-                        onClick={() => setSearchTerm("")}
-                        className="text-slate-400 hover:text-slate-600"
-                      >
-                        <i data-lucide="x" className="w-3.5 h-3.5"></i>
-                      </button>
-                    )}
-                  </div>
-
                   <div className="flex justify-between items-center px-1 text-[10px] font-black text-gray-400 uppercase tracking-widest">
                     <span>Member List {searchTerm.trim() && "(필터링됨)"}</span>
                     <span className="text-blue-600 bg-blue-50 px-2 py-0.5 rounded-md">
@@ -754,7 +780,6 @@
                     </span>
                   </div>
 
-                  {/* 필터링된 결과(`filteredMembers`)를 기반으로 카드 리스트 출력 */}
                   <div
                     className={
                       "space-y-4 " +
@@ -897,179 +922,197 @@
                   )}
                 </div>
               ) : (
-                // 랭킹 영역
+                // 🏆 🛠️ 랭킹 영역 (필터링 리스트 `filteredRankings` 연동 완료)
                 <div className="space-y-3">
-                  <h2 className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-4 px-1">
-                    Season Standings
-                  </h2>
-                  {sortedMembersByRanking.map((m, i) => {
-                    const isExpanded = expandedMemberId === m.id;
-                    const history = getAbsentHistory(m.id);
-                    const rankScore = (stats[m.id] && stats[m.id].total) || 0;
-                    const mStats = stats[m.id] || {
-                      presentPct: "0.0",
-                      absentPct: "0.0",
-                      noshowPct: "0.0",
-                      todayPresentPct: "0.0",
-                      present: 0,
-                      todayPresent: 0,
-                    };
+                  <div className="flex justify-between items-center px-1 text-[10px] font-black text-gray-400 uppercase tracking-widest mb-4">
+                    <span>
+                      Season Standings {searchTerm.trim() && "(필터링됨)"}
+                    </span>
+                    <span>총원: {members.length}명</span>
+                  </div>
 
-                    const totalPlayedMatches =
-                      Number(mStats.present) + Number(mStats.todayPresent);
+                  {filteredRankings.length > 0 ? (
+                    filteredRankings.map((m) => {
+                      // 마스터 목록 기준 인덱스 맵핑으로 본래 전체 순위 등수 유지
+                      const globalRankIndex = sortedMembersByRanking.findIndex(
+                        (x) => x.id === m.id,
+                      );
 
-                    return (
-                      <div
-                        key={m.id}
-                        className={`flex flex-col bg-white rounded-[1.5rem] border transition-all shadow-sm ${isExpanded ? "border-blue-500 ring-2 ring-blue-100" : "border-gray-100 hover:border-gray-200"}`}
-                      >
+                      const isExpanded = expandedMemberId === m.id;
+                      const history = getAbsentHistory(m.id);
+                      const rankScore = (stats[m.id] && stats[m.id].total) || 0;
+                      const mStats = stats[m.id] || {
+                        presentPct: "0.0",
+                        absentPct: "0.0",
+                        noshowPct: "0.0",
+                        todayPresentPct: "0.0",
+                        present: 0,
+                        todayPresent: 0,
+                      };
+
+                      const totalPlayedMatches =
+                        Number(mStats.present) + Number(mStats.todayPresent);
+
+                      return (
                         <div
-                          onClick={() =>
-                            setExpandedMemberId(isExpanded ? null : m.id)
-                          }
-                          className="flex items-center gap-4 p-5 cursor-pointer"
+                          key={m.id}
+                          className={`flex flex-col bg-white rounded-[1.5rem] border transition-all shadow-sm ${isExpanded ? "border-blue-500 ring-2 ring-blue-100" : "border-gray-100 hover:border-gray-200"}`}
                         >
                           <div
-                            className={`w-12 h-12 rounded-2xl flex items-center justify-center font-black text-xl shadow-sm ${i === 0 ? "bg-yellow-400 text-white shadow-lg" : i === 1 ? "bg-slate-300 text-white" : i === 2 ? "bg-orange-300 text-white" : "bg-gray-50 text-gray-400"}`}
+                            onClick={() =>
+                              setExpandedMemberId(isExpanded ? null : m.id)
+                            }
+                            className="flex items-center gap-4 p-5 cursor-pointer"
                           >
-                            {i + 1}
-                          </div>
-                          <div className="flex-1">
-                            <div className="font-black text-gray-800 text-lg leading-tight">
-                              {m.name}
+                            <div
+                              className={`w-12 h-12 rounded-2xl flex items-center justify-center font-black text-xl shadow-sm ${globalRankIndex === 0 ? "bg-yellow-400 text-white shadow-lg" : globalRankIndex === 1 ? "bg-slate-300 text-white" : globalRankIndex === 2 ? "bg-orange-300 text-white" : "bg-gray-50 text-gray-400"}`}
+                            >
+                              {globalRankIndex + 1}
                             </div>
-                            <div className="text-[10px] text-gray-400 font-bold uppercase mt-1 tracking-tighter">
-                              Played {totalPlayedMatches} Match(es)
+                            <div className="flex-1">
+                              <div className="font-black text-gray-800 text-lg leading-tight">
+                                {m.name}
+                              </div>
+                              <div className="text-[10px] text-gray-400 font-bold uppercase mt-1 tracking-tighter">
+                                Played {totalPlayedMatches} Match(es)
+                              </div>
+                            </div>
+                            <div
+                              className={`text-2xl font-black tracking-tighter ${rankScore >= 0 ? "text-blue-600" : "text-rose-500"}`}
+                            >
+                              {rankScore > 0 ? "+" + rankScore : rankScore}
                             </div>
                           </div>
-                          <div
-                            className={`text-2xl font-black tracking-tighter ${rankScore >= 0 ? "text-blue-600" : "text-rose-500"}`}
-                          >
-                            {rankScore > 0 ? "+" + rankScore : rankScore}
-                          </div>
-                        </div>
 
-                        {/* 확장 아코디언 */}
-                        {isExpanded && (
-                          <div className="bg-slate-50 rounded-b-[1.5rem] p-4 border-t border-gray-100 space-y-4 text-xs">
-                            {/* 4대 출석 비율 그래프 바 */}
-                            <div className="space-y-2 bg-white p-3.5 rounded-2xl border border-gray-100 shadow-3xs">
-                              <div className="font-bold text-gray-700 text-[11px] uppercase tracking-wider flex items-center gap-1">
-                                📊 개인 출석 분포 통계 비율
-                              </div>
-                              <div className="space-y-2 pt-1">
-                                <div>
-                                  <div className="flex justify-between font-bold text-[10px] text-slate-500 mb-1">
-                                    <span>정상참석률</span>
-                                    <span className="text-emerald-500">
-                                      {mStats.presentPct}%
-                                    </span>
-                                  </div>
-                                  <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
-                                    <div
-                                      className="bg-emerald-500 h-full"
-                                      style={{ width: mStats.presentPct + "%" }}
-                                    ></div>
-                                  </div>
+                          {isExpanded && (
+                            <div className="bg-slate-50 rounded-b-[1.5rem] p-4 border-t border-gray-100 space-y-4 text-xs">
+                              {/* 4대 출석 비율 그래프 바 */}
+                              <div className="space-y-2 bg-white p-3.5 rounded-2xl border border-gray-100 shadow-3xs">
+                                <div className="font-bold text-gray-700 text-[11px] uppercase tracking-wider flex items-center gap-1">
+                                  📊 개인 출석 분포 통계 비율
                                 </div>
-                                <div>
-                                  <div className="flex justify-between font-bold text-[10px] text-slate-500 mb-1">
-                                    <span>당일참석률</span>
-                                    <span className="text-blue-500">
-                                      {mStats.todayPresentPct}%
-                                    </span>
-                                  </div>
-                                  <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
-                                    <div
-                                      className="bg-blue-500 h-full"
-                                      style={{
-                                        width: mStats.todayPresentPct + "%",
-                                      }}
-                                    ></div>
-                                  </div>
-                                </div>
-                                <div>
-                                  <div className="flex justify-between font-bold text-[10px] text-slate-500 mb-1">
-                                    <span>일반불참률</span>
-                                    <span className="text-slate-500">
-                                      {mStats.absentPct}%
-                                    </span>
-                                  </div>
-                                  <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
-                                    <div
-                                      className="bg-slate-400 h-full"
-                                      style={{ width: mStats.absentPct + "%" }}
-                                    ></div>
-                                  </div>
-                                </div>
-                                <div>
-                                  <div className="flex justify-between font-bold text-[10px] text-slate-500 mb-1">
-                                    <span>당일불참률</span>
-                                    <span className="text-rose-500">
-                                      {mStats.noshowPct}%
-                                    </span>
-                                  </div>
-                                  <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
-                                    <div
-                                      className="bg-rose-500 h-full"
-                                      style={{ width: mStats.noshowPct + "%" }}
-                                    ></div>
-                                  </div>
-                                </div>
-                              </div>
-                            </div>
-
-                            {/* 머리말 로그 단락 */}
-                            <div className="space-y-2">
-                              <div className="font-bold text-slate-700 text-[11px] uppercase tracking-wider flex items-center gap-1">
-                                📋 불참 누적 사유 기록
-                              </div>
-                              {history.length > 0 ? (
-                                <div className="space-y-1.5 max-h-40 overflow-y-auto no-scrollbar">
-                                  {history.map((h, idx) => (
-                                    <div
-                                      key={idx}
-                                      className="bg-white p-2.5 rounded-xl border border-gray-100 flex flex-col gap-1 shadow-3xs"
-                                    >
-                                      <div className="flex justify-between items-center">
-                                        <span className="font-mono text-[10px] text-gray-400 font-bold">
-                                          {h.date}
-                                        </span>
-                                        <span
-                                          className={`text-[9px] font-black px-1.5 py-0.5 rounded ${h.type === "당일불참" ? "bg-rose-50 text-rose-600" : "bg-slate-100 text-slate-600"}`}
-                                        >
-                                          {h.type}
-                                        </span>
-                                      </div>
-                                      <span className="text-gray-700 font-medium text-[11px]">
-                                        <strong
-                                          className={
-                                            h.type === "당일불참"
-                                              ? "text-rose-500"
-                                              : "text-slate-500"
-                                          }
-                                        >
-                                          [{h.type}]
-                                        </strong>{" "}
-                                        {typeof h.reason === "object"
-                                          ? h.reason.value
-                                          : h.reason}
+                                <div className="space-y-2 pt-1">
+                                  <div>
+                                    <div className="flex justify-between font-bold text-[10px] text-slate-500 mb-1">
+                                      <span>정상참석률</span>
+                                      <span className="text-emerald-500">
+                                        {mStats.presentPct}%
                                       </span>
                                     </div>
-                                  ))}
+                                    <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                                      <div
+                                        className="bg-emerald-500 h-full"
+                                        style={{
+                                          width: mStats.presentPct + "%",
+                                        }}
+                                      ></div>
+                                    </div>
+                                  </div>
+                                  <div>
+                                    <div className="flex justify-between font-bold text-[10px] text-slate-500 mb-1">
+                                      <span>당일참석률</span>
+                                      <span className="text-blue-500">
+                                        {mStats.todayPresentPct}%
+                                      </span>
+                                    </div>
+                                    <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                                      <div
+                                        className="bg-blue-500 h-full"
+                                        style={{
+                                          width: mStats.todayPresentPct + "%",
+                                        }}
+                                      ></div>
+                                    </div>
+                                  </div>
+                                  <div>
+                                    <div className="flex justify-between font-bold text-[10px] text-slate-500 mb-1">
+                                      <span>일반불참률</span>
+                                      <span className="text-slate-500">
+                                        {mStats.absentPct}%
+                                      </span>
+                                    </div>
+                                    <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                                      <div
+                                        className="bg-slate-400 h-full"
+                                        style={{
+                                          width: mStats.absentPct + "%",
+                                        }}
+                                      ></div>
+                                    </div>
+                                  </div>
+                                  <div>
+                                    <div className="flex justify-between font-bold text-[10px] text-slate-500 mb-1">
+                                      <span>당일불참률</span>
+                                      <span className="text-rose-500">
+                                        {mStats.noshowPct}%
+                                      </span>
+                                    </div>
+                                    <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                                      <div
+                                        className="bg-rose-500 h-full"
+                                        style={{
+                                          width: mStats.noshowPct + "%",
+                                        }}
+                                      ></div>
+                                    </div>
+                                  </div>
                                 </div>
-                              ) : (
-                                <p className="text-gray-400 italic py-1 pl-1">
-                                  특이 기입 사유가 전혀 없는 출석 최우수
-                                  회원입니다! 👍
-                                </p>
-                              )}
+                              </div>
+
+                              {/* 사유 리스트 출력 단락 */}
+                              <div className="space-y-2">
+                                <div className="font-bold text-slate-700 text-[11px] uppercase tracking-wider flex items-center gap-1">
+                                  📋 불참 누적 사유 기록
+                                </div>
+                                {history.length > 0 ? (
+                                  <div className="space-y-1.5 max-h-40 overflow-y-auto no-scrollbar">
+                                    {history.map((h, idx) => (
+                                      <div
+                                        key={idx}
+                                        className="bg-white p-2.5 rounded-xl border border-gray-100 flex flex-col gap-1 shadow-3xs"
+                                      >
+                                        <div className="flex justify-between items-center">
+                                          <span className="font-mono text-[10px] text-gray-400 font-bold">
+                                            {h.date}
+                                          </span>
+                                          <span
+                                            className={`text-[9px] font-black px-1.5 py-0.5 rounded ${h.type === "당일불참" ? "bg-rose-50 text-rose-600" : "bg-slate-100 text-slate-600"}`}
+                                          >
+                                            {h.type}
+                                          </span>
+                                        </div>
+                                        <span className="text-gray-700 font-medium text-[11px]">
+                                          <strong
+                                            className={
+                                              h.type === "당일불참"
+                                                ? "text-rose-500"
+                                                : "text-slate-500"
+                                            }
+                                          >
+                                            [{h.type}]
+                                          </strong>{" "}
+                                          {h.reason}
+                                        </span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <p className="text-gray-400 italic py-1 pl-1">
+                                    특이 기입 사유가 전혀 없는 출석 최우수
+                                    회원입니다! 👍
+                                  </p>
+                                )}
+                              </div>
                             </div>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
+                          )}
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <div className="text-center py-8 text-xs font-bold text-slate-400 bg-slate-50 border border-dashed rounded-2xl">
+                      🔍 '{searchTerm}' 이름과 매칭되는 순위가 없습니다.
+                    </div>
+                  )}
                 </div>
               )}
             </main>
