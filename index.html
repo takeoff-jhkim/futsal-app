@@ -125,7 +125,7 @@
       const App = () => {
         const [fbStatus, setFbStatus] = useState("waiting");
         const [user, setUser] = useState(null);
-        const [isActualAdmin, setIsActualAdmin] = useState(false); // 실제 이메일 인증된 관리자 여부 플래그
+        const [isActualAdmin, setIsActualAdmin] = useState(false);
         const [members, setMembers] = useState([]);
         const [attendance, setAttendance] = useState({});
         const [selectedDate, setSelectedDate] = useState(
@@ -136,7 +136,10 @@
         const [isInitialLoading, setIsInitialLoading] = useState(true);
         const [errorMessage, setErrorMessage] = useState(null);
 
-        // 모달 전용 상태들
+        // 검색어 전용 상태값 추가
+        const [searchTerm, setSearchTerm] = useState("");
+
+        // 사유 수집 및 인증 모달 상태
         const [reasonModal, setReasonModal] = useState({
           isOpen: false,
           memberId: null,
@@ -150,7 +153,7 @@
         });
         const [expandedMemberId, setExpandedMemberId] = useState(null);
 
-        // Firebase Auth 상태 변화 감지
+        // Firebase Auth 인증 상태 감지
         useEffect(() => {
           const timer = setInterval(() => {
             if (window.FB_TOOLS) {
@@ -161,20 +164,18 @@
               if (!auth) {
                 setFbStatus("local");
                 setUser({ uid: "local-user" });
-                setIsActualAdmin(true); // 로컬모드는 테스트 편의상 전체허용
+                setIsActualAdmin(true);
                 setIsInitialLoading(false);
                 return;
               }
 
               setFbStatus("ready");
-
-              // 로그인 상태 실시간 추적 감지 수동 바인딩
               onAuthStateChanged(auth, (u) => {
                 setUser(u);
                 if (u && !u.isAnonymous) {
-                  setIsActualAdmin(true); // 이메일 로그인 시 관리자 권한 ON
+                  setIsActualAdmin(true);
                 } else {
-                  setIsActualAdmin(false); // 익명 계정은 일반 회원 권한
+                  setIsActualAdmin(false);
                   if (!u) {
                     signInAnonymously().catch(() =>
                       setErrorMessage("기본 회원 인증 실패"),
@@ -193,8 +194,8 @@
           const { db, appId: fbAppId } = window.FB_TOOLS;
 
           if (!db) {
-            const m = localStorage.getItem("futsal_members_v19");
-            const a = localStorage.getItem("futsal_attendance_v19");
+            const m = localStorage.getItem("futsal_members_v23");
+            const a = localStorage.getItem("futsal_attendance_v23");
             if (m) setMembers(JSON.parse(m));
             if (a) setAttendance(JSON.parse(a));
             setIsInitialLoading(false);
@@ -232,12 +233,12 @@
           };
         }, [user, fbStatus]);
 
-        // 로컬 자동 백업 및 아이콘 동기화
+        // 로컬 오토세이브 및 아이콘 매핑
         useEffect(() => {
           if (fbStatus === "local" && !isInitialLoading) {
-            localStorage.setItem("futsal_members_v19", JSON.stringify(members));
+            localStorage.setItem("futsal_members_v23", JSON.stringify(members));
             localStorage.setItem(
-              "futsal_attendance_v19",
+              "futsal_attendance_v23",
               JSON.stringify(attendance),
             );
           }
@@ -249,13 +250,13 @@
           activeTab,
           fbStatus,
           isActualAdmin,
+          searchTerm,
         ]);
 
-        // 관리자 이메일 로그인 처리
+        // 관리자 로그인
         const handleAdminLoginSubmit = async (e) => {
           e.preventDefault();
           if (!loginModal.email.trim() || !loginModal.password.trim()) return;
-
           try {
             setIsInitialLoading(true);
             await firebase
@@ -265,23 +266,21 @@
                 loginModal.password.trim(),
               );
             setLoginModal({ isOpen: false, email: "", password: "" });
-            alert("관리자 인증 성공! 출석부 수정 권한이 부여되었습니다. 🔓");
+            alert("관리자 인증 성공! 출석부 제어 권한이 활성화되었습니다. 🔓");
           } catch (err) {
-            alert(
-              "로그인 실패: 계정 정보가 정확하지 않거나 관리자 계정이 아닙니다.",
-            );
+            alert("로그인 실패: 계정 정보를 다시 확인해 주세요.");
           } finally {
             setIsInitialLoading(false);
           }
         };
 
-        // 관리자 로그아웃 처리 (다시 익명 일반회원으로 강등)
+        // 관리자 로그아웃
         const handleAdminLogout = async () => {
-          if (!confirm("관리자 모드를 종료하고 로그아웃 하시겠습니까?")) return;
+          if (!confirm("관리자 모드를 종료하시겠습니까?")) return;
           try {
             setIsInitialLoading(true);
             await firebase.auth().signOut();
-            alert("로그아웃 되었습니다. 조회 전용 모드로 전환합니다. 🔒");
+            alert("조회 전용 모드로 전환되었습니다. 🔒");
           } catch (err) {
             setErrorMessage("로그아웃 실패");
           } finally {
@@ -289,7 +288,7 @@
           }
         };
 
-        // 점수 계산 팩터
+        // 통합 데이터 통계 및 누적 랭킹 점수 계산 엔진
         const stats = useMemo(() => {
           const res = {};
           members.forEach((m) => {
@@ -297,6 +296,7 @@
             let presentCount = 0;
             let absentCount = 0;
             let noshowCount = 0;
+            let todayPresentCount = 0;
 
             const memberKeys = Object.keys(attendance).filter(
               (k) => k.indexOf("_" + m.id) !== -1,
@@ -313,17 +313,26 @@
               } else if (attendance[baseKey] === "present") {
                 totalScore += 1;
                 presentCount += 1;
-              } else if (attendance[baseKey] === "absent") {
-                absentCount += 1;
+              } else {
+                let isPureAbsent = false;
+                let isTodayPresent = false;
+                if (attendance[baseKey] === "absent") isPureAbsent = true;
+                if (attendance[baseKey + "_today_present"])
+                  isTodayPresent = true;
+
+                if (isPureAbsent) absentCount += 1;
+                if (isTodayPresent) todayPresentCount += 1;
               }
             });
 
-            const totalActiveDays = presentCount + absentCount + noshowCount;
+            const totalActiveDays =
+              presentCount + absentCount + noshowCount + todayPresentCount;
             res[m.id] = {
               total: totalScore,
               present: presentCount,
               absent: absentCount,
               noshow: noshowCount,
+              todayPresent: todayPresentCount,
               totalDays: totalActiveDays,
               presentPct:
                 totalActiveDays > 0
@@ -337,12 +346,24 @@
                 totalActiveDays > 0
                   ? ((noshowCount / totalActiveDays) * 100).toFixed(1)
                   : "0.0",
+              todayPresentPct:
+                totalActiveDays > 0
+                  ? ((todayPresentCount / totalActiveDays) * 100).toFixed(1)
+                  : "0.0",
             };
           });
           return res;
         }, [members, attendance]);
 
-        // 불참 통합 히스토리 파싱
+        // 검색 필터링이 반영된 멤버 리스트 파싱
+        const filteredMembers = useMemo(() => {
+          if (!searchTerm.trim()) return members;
+          return members.filter(
+            (m) => m.name.indexOf(searchTerm.trim()) !== -1,
+          );
+        }, [members, searchTerm]);
+
+        // 📋 랭킹 탭: 개인별 특이 사유 이력 추출
         const getAbsentHistory = (memberId) => {
           const history = [];
           Object.keys(attendance).forEach((key) => {
@@ -360,13 +381,16 @@
               attendance[key] === "absent" &&
               !attendance[date + "_" + memberId + "_noshow"]
             ) {
+              const normalReasonKey = date + "_" + memberId + "_absent_reason";
               history.push({
                 date: date,
                 type: "일반불참",
-                reason: attendance[reasonKey] || "사유 미입력",
+                reason:
+                  normalReasonKey || attendance[reasonKey] || "사유 미입력",
               });
             }
           });
+
           const uniqueHistory = [];
           const visitedDates = {};
           history.forEach((item) => {
@@ -387,103 +411,132 @@
           });
         }, [members, stats]);
 
-        // 출석 토글 핸들러
+        // 중복 선택 및 상태 제어 출석 핸들러
         const handleStatus = async (mId, status) => {
-          if (!isActualAdmin) return; // 관리자가 아니면 권한 거부 및 무반응 처리
-          const { db, appId: fbAppId } = window.FB_TOOLS;
+          if (!isActualAdmin) return;
+
           const baseKey = selectedDate + "_" + mId;
           const noshowKey = baseKey + "_noshow";
+          const tpKey = baseKey + "_today_present";
+
           const reasonKey = baseKey + "_reason";
+          const absentReasonKey = baseKey + "_absent_reason";
 
-          const isNoshowCurrently = !!attendance[noshowKey];
-          const currentEffectiveStatus = isNoshowCurrently
-            ? "no-show"
-            : attendance[baseKey];
+          const isCurrentPresent =
+            attendance[baseKey] === "present" && !attendance[noshowKey];
+          const isCurrentAbsent =
+            attendance[baseKey] === "absent" && !attendance[noshowKey];
+          const isCurrentNoshow = !!attendance[noshowKey];
+          const isCurrentTodayPresent = !!attendance[tpKey];
 
-          if (currentEffectiveStatus === status) {
-            if (db) {
-              const batch = db.batch();
-              batch.set(
-                db.doc(
-                  "artifacts/" + fbAppId + "/public/data/attendance/" + baseKey,
-                ),
-                { value: null },
-              );
-              batch.set(
-                db.doc(
-                  "artifacts/" +
-                    fbAppId +
-                    "/public/data/attendance/" +
-                    noshowKey,
-                ),
-                { value: false },
-              );
-              batch.set(
-                db.doc(
-                  "artifacts/" +
-                    fbAppId +
-                    "/public/data/attendance/" +
-                    reasonKey,
-                ),
-                { value: "" },
-              );
-              await batch.commit();
+          if (status === "present") {
+            if (isCurrentPresent) {
+              await commitAttendanceData(mId, {
+                [baseKey]: null,
+                [noshowKey]: false,
+                [tpKey]: false,
+                [reasonKey]: "",
+                [absentReasonKey]: "",
+              });
             } else {
-              setAttendance((prev) => {
-                const next = Object.assign({}, prev);
-                next[baseKey] = null;
-                next[noshowKey] = false;
-                next[reasonKey] = "";
-                return next;
+              await commitAttendanceData(mId, {
+                [baseKey]: "present",
+                [noshowKey]: false,
+                [tpKey]: false,
+                [reasonKey]: "",
+                [absentReasonKey]: "",
               });
             }
             return;
           }
 
-          if (status === "absent" || status === "no-show") {
-            setReasonModal({
-              isOpen: true,
-              memberId: mId,
-              type: status,
-              reason: attendance[reasonKey] || "",
-            });
-          } else if (status === "present") {
-            if (db) {
-              const batch = db.batch();
-              batch.set(
-                db.doc(
-                  "artifacts/" + fbAppId + "/public/data/attendance/" + baseKey,
-                ),
-                { value: "present" },
-              );
-              batch.set(
-                db.doc(
-                  "artifacts/" +
-                    fbAppId +
-                    "/public/data/attendance/" +
-                    noshowKey,
-                ),
-                { value: false },
-              );
-              batch.set(
-                db.doc(
-                  "artifacts/" +
-                    fbAppId +
-                    "/public/data/attendance/" +
-                    reasonKey,
-                ),
-                { value: "" },
-              );
-              await batch.commit();
+          if (status === "no-show") {
+            if (isCurrentNoshow) {
+              await commitAttendanceData(mId, {
+                [baseKey]: null,
+                [noshowKey]: false,
+                [tpKey]: false,
+                [reasonKey]: "",
+                [absentReasonKey]: "",
+              });
             } else {
-              setAttendance((prev) => {
-                const next = Object.assign({}, prev);
-                next[baseKey] = "present";
-                next[noshowKey] = false;
-                next[reasonKey] = "";
-                return next;
+              setReasonModal({
+                isOpen: true,
+                memberId: mId,
+                type: "no-show",
+                reason: attendance[reasonKey] || "",
               });
             }
+            return;
+          }
+
+          if (status === "absent") {
+            if (isCurrentPresent || isCurrentNoshow) {
+              setReasonModal({
+                isOpen: true,
+                memberId: mId,
+                type: "absent",
+                reason: "",
+              });
+              return;
+            }
+
+            if (isCurrentAbsent) {
+              await commitAttendanceData(mId, {
+                [baseKey]: null,
+                [absentReasonKey]: "",
+              });
+            } else {
+              setReasonModal({
+                isOpen: true,
+                memberId: mId,
+                type: "absent",
+                reason: attendance[absentReasonKey] || "",
+              });
+            }
+            return;
+          }
+
+          if (status === "today-present") {
+            if (isCurrentPresent || isCurrentNoshow) {
+              await commitAttendanceData(mId, {
+                [baseKey]: null,
+                [noshowKey]: false,
+                [tpKey]: true,
+                [reasonKey]: "",
+                [absentReasonKey]: "",
+              });
+              return;
+            }
+
+            if (isCurrentTodayPresent) {
+              await commitAttendanceData(mId, { [tpKey]: false });
+            } else {
+              await commitAttendanceData(mId, { [tpKey]: true });
+            }
+            return;
+          }
+        };
+
+        const commitAttendanceData = async (mId, updatePayload) => {
+          const { db, appId: fbAppId } = window.FB_TOOLS;
+          if (db) {
+            const batch = db.batch();
+            Object.keys(updatePayload).forEach((k) => {
+              batch.set(
+                db.doc("artifacts/" + fbAppId + "/public/data/attendance/" + k),
+                { value: updatePayload[k] },
+              );
+            });
+            await batch.commit();
+          } else {
+            setAttendance((prev) => {
+              const next = Object.assign({}, prev);
+              Object.keys(updatePayload).forEach((k) => {
+                next[k] = updatePayload[k];
+              });
+              return next;
+            });
           }
         };
 
@@ -492,61 +545,36 @@
           const { memberId, type, reason } = reasonModal;
           if (!memberId || !isActualAdmin) return;
 
-          const { db, appId: fbAppId } = window.FB_TOOLS;
           const baseKey = selectedDate + "_" + memberId;
           const noshowKey = baseKey + "_noshow";
+          const tpKey = baseKey + "_today_present";
+
           const reasonKey = baseKey + "_reason";
+          const absentReasonKey = baseKey + "_absent_reason";
+
           const text = reason.trim() || "개인 사정";
+          const payload = {};
 
-          const targetStatusValue = "absent";
-          const targetNoshowValue = type === "no-show";
-
-          try {
-            if (db) {
-              const batch = db.batch();
-              batch.set(
-                db.doc(
-                  "artifacts/" + fbAppId + "/public/data/attendance/" + baseKey,
-                ),
-                { value: targetStatusValue },
-              );
-              batch.set(
-                db.doc(
-                  "artifacts/" +
-                    fbAppId +
-                    "/public/data/attendance/" +
-                    noshowKey,
-                ),
-                { value: targetNoshowValue },
-              );
-              batch.set(
-                db.doc(
-                  "artifacts/" +
-                    fbAppId +
-                    "/public/data/attendance/" +
-                    reasonKey,
-                ),
-                { value: text },
-              );
-              await batch.commit();
-            } else {
-              setAttendance((prev) => {
-                const next = Object.assign({}, prev);
-                next[baseKey] = targetStatusValue;
-                next[noshowKey] = targetNoshowValue;
-                next[reasonKey] = text;
-                return next;
-              });
-            }
-            setReasonModal({
-              isOpen: false,
-              memberId: null,
-              type: "",
-              reason: "",
-            });
-          } catch (err) {
-            setErrorMessage("사유 저장 실패");
+          if (type === "no-show") {
+            payload[baseKey] = "absent";
+            payload[noshowKey] = true;
+            payload[tpKey] = false;
+            payload[reasonKey] = text;
+            payload[absentReasonKey] = "";
+          } else if (type === "absent") {
+            payload[baseKey] = "absent";
+            payload[noshowKey] = false;
+            payload[absentReasonKey] = text;
+            if (attendance[noshowKey]) payload[noshowKey] = false;
           }
+
+          await commitAttendanceData(memberId, payload);
+          setReasonModal({
+            isOpen: false,
+            memberId: null,
+            type: "",
+            reason: "",
+          });
         };
 
         const addMember = async (e) => {
@@ -591,7 +619,7 @@
               <div className="flex flex-col items-center">
                 <div className="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-4"></div>
                 <p className="text-gray-400 text-sm font-medium">
-                  데이터 허가 체크 중...
+                  레이아웃 세팅 중...
                 </p>
               </div>
             </div>
@@ -611,7 +639,7 @@
               </div>
             )}
 
-            {/* 시각디자인 헤더 파란색 배경 */}
+            {/* 헤더 */}
             <header className="bg-blue-600 p-6 pt-12 rounded-b-[2.5rem] shadow-lg text-white">
               <div className="flex justify-between items-center mb-6">
                 <div>
@@ -628,7 +656,6 @@
                   </div>
                 </div>
 
-                {/* 우측 관리자 자물쇠 버튼 토글 제어 구역 */}
                 {isActualAdmin ? (
                   <button
                     onClick={handleAdminLogout}
@@ -685,113 +712,163 @@
             <main className="flex-1 px-6 pb-28 overflow-y-auto no-scrollbar">
               {activeTab === "attendance" ? (
                 <div className="space-y-4">
+                  {/* 🔍 실시간 이름 검색바 레이아웃 추가 구역 */}
+                  <div className="bg-slate-100 rounded-2xl px-4 py-2.5 flex items-center gap-3 border border-slate-200/60 focus-within:border-blue-400 focus-within:bg-white transition-all shadow-inner">
+                    <i
+                      data-lucide="search"
+                      className="text-slate-400 w-4 h-4"
+                    ></i>
+                    <input
+                      type="text"
+                      placeholder="이름으로 팀원 검색..."
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                      className="bg-transparent outline-none text-xs font-bold text-gray-700 w-full placeholder-slate-400"
+                    />
+                    {searchTerm && (
+                      <button
+                        onClick={() => setSearchTerm("")}
+                        className="text-slate-400 hover:text-slate-600"
+                      >
+                        <i data-lucide="x" className="w-3.5 h-3.5"></i>
+                      </button>
+                    )}
+                  </div>
+
                   <div className="flex justify-between items-center px-1 text-[10px] font-black text-gray-400 uppercase tracking-widest">
-                    <span>Member List {!isActualAdmin && "(조회 전용)"}</span>
+                    <span>Member List {searchTerm.trim() && "(필터링됨)"}</span>
                     <span className="text-blue-600 bg-blue-50 px-2 py-0.5 rounded-md">
-                      참석:{" "}
+                      총 참석:{" "}
                       {
-                        members.filter(
-                          (m) =>
-                            attendance[selectedDate + "_" + m.id] ===
-                              "present" &&
-                            !attendance[selectedDate + "_" + m.id + "_noshow"],
-                        ).length
+                        members.filter((m) => {
+                          const baseKey = selectedDate + "_" + m.id;
+                          const isPresent =
+                            attendance[baseKey] === "present" &&
+                            !attendance[baseKey + "_noshow"];
+                          const isTodayPresent =
+                            !!attendance[baseKey + "_today_present"];
+                          return isPresent || isTodayPresent;
+                        }).length
                       }
                       명
                     </span>
                   </div>
 
-                  {/* 일반 회원일 땐 출석 탭 영역 전체에 불투명 오버레이를 주거나 비활성화 느낌을 적용 */}
+                  {/* 필터링된 결과(`filteredMembers`)를 기반으로 카드 리스트 출력 */}
                   <div
                     className={
                       "space-y-4 " +
                       (!isActualAdmin ? "opacity-75 pointer-events-none" : "")
                     }
                   >
-                    {members.map((m) => {
-                      const isNoshow =
-                        !!attendance[selectedDate + "_" + m.id + "_noshow"];
-                      const isAbsent =
-                        attendance[selectedDate + "_" + m.id] === "absent";
+                    {filteredMembers.length > 0 ? (
+                      filteredMembers.map((m) => {
+                        const baseKey = selectedDate + "_" + m.id;
+                        const noshowKey = baseKey + "_noshow";
+                        const tpKey = baseKey + "_today_present";
 
-                      let currentStatus = null;
-                      if (isNoshow) currentStatus = "no-show";
-                      else if (isAbsent) currentStatus = "absent";
-                      else if (
-                        attendance[selectedDate + "_" + m.id] === "present"
-                      )
-                        currentStatus = "present";
+                        const statusPresent =
+                          attendance[baseKey] === "present" &&
+                          !attendance[noshowKey];
+                        const statusAbsent =
+                          attendance[baseKey] === "absent" &&
+                          !attendance[noshowKey];
+                        const statusNoshow = !!attendance[noshowKey];
+                        const statusTodayPresent = !!attendance[tpKey];
 
-                      const todayReason =
-                        attendance[
-                          selectedDate + "_" + m.id + "_reason__value"
-                        ] || attendance[selectedDate + "_" + m.id + "_reason"];
-                      const mScore = (stats[m.id] && stats[m.id].total) || 0;
+                        const reasonText =
+                          attendance[baseKey + "_reason__value"] ||
+                          attendance[baseKey + "_reason"];
+                        const absentReasonText =
+                          attendance[baseKey + "_absent_reason__value"] ||
+                          attendance[baseKey + "_absent_reason"];
 
-                      return (
-                        <div
-                          key={m.id}
-                          className="bg-white border border-gray-100 rounded-[1.5rem] p-4 shadow-sm space-y-3"
-                        >
-                          <div className="flex justify-between items-center px-1">
-                            <div className="flex flex-col">
-                              <span className="font-black text-gray-800 text-lg leading-none">
-                                {m.name}
-                              </span>
-                              <span className="text-[10px] text-blue-500 font-bold mt-1.5 italic">
-                                Score: {mScore}pt
-                              </span>
+                        const mScore = (stats[m.id] && stats[m.id].total) || 0;
+
+                        return (
+                          <div
+                            key={m.id}
+                            className="bg-white border border-gray-100 rounded-[1.5rem] p-4 shadow-sm space-y-3"
+                          >
+                            <div className="flex justify-between items-center px-1">
+                              <div className="flex flex-col">
+                                <span className="font-black text-gray-800 text-lg leading-none">
+                                  {m.name}
+                                </span>
+                                <span className="text-[10px] text-blue-500 font-bold mt-1.5 italic">
+                                  Score: {mScore}pt
+                                </span>
+                              </div>
+                              {isActualAdmin && (
+                                <button
+                                  onClick={() => removeMember(m.id)}
+                                  className="p-2 text-gray-200 hover:text-red-400 transition-colors"
+                                >
+                                  <i
+                                    data-lucide="trash-2"
+                                    className="w-4 h-4"
+                                  ></i>
+                                </button>
+                              )}
                             </div>
-                            {isActualAdmin && (
-                              <button
-                                onClick={() => removeMember(m.id)}
-                                className="p-2 text-gray-200 hover:text-red-400 transition-colors"
-                              >
-                                <i
-                                  data-lucide="trash-2"
-                                  className="w-4 h-4"
-                                ></i>
-                              </button>
-                            )}
-                          </div>
-                          <div className="grid grid-cols-3 gap-2">
-                            <StatusBtn
-                              label="참석"
-                              score="+1"
-                              color="bg-emerald-500"
-                              active={currentStatus === "present"}
-                              onClick={() => handleStatus(m.id, "present")}
-                            />
-                            <StatusBtn
-                              label="불참"
-                              score="0"
-                              color="bg-slate-400"
-                              active={currentStatus === "absent"}
-                              onClick={() => handleStatus(m.id, "absent")}
-                            />
-                            <StatusBtn
-                              label="당일불참"
-                              score="-1"
-                              color="bg-rose-500"
-                              active={currentStatus === "no-show"}
-                              onClick={() => handleStatus(m.id, "no-show")}
-                            />
-                          </div>
-                          {(currentStatus === "absent" ||
-                            currentStatus === "no-show") &&
-                            todayReason && (
-                              <div
-                                className={`text-[11px] font-medium px-3 py-2 rounded-xl border ${currentStatus === "no-show" ? "bg-rose-50 text-rose-600 border-rose-100" : "bg-slate-50 text-slate-600 border-slate-100"}`}
-                              >
-                                💬 사유:{" "}
-                                {typeof todayReason === "object"
-                                  ? todayReason.value
-                                  : todayReason}
+
+                            <div className="grid grid-cols-4 gap-1">
+                              <StatusBtn
+                                label="참석"
+                                score="+1"
+                                color="bg-emerald-500"
+                                active={statusPresent}
+                                onClick={() => handleStatus(m.id, "present")}
+                              />
+                              <StatusBtn
+                                label="당일불참"
+                                score="-1"
+                                color="bg-rose-500"
+                                active={statusNoshow}
+                                onClick={() => handleStatus(m.id, "no-show")}
+                              />
+                              <StatusBtn
+                                label="불참"
+                                score="0"
+                                color="bg-slate-500"
+                                active={statusAbsent}
+                                onClick={() => handleStatus(m.id, "absent")}
+                              />
+                              <StatusBtn
+                                label="당일참석"
+                                score="0"
+                                color="bg-blue-500"
+                                active={statusTodayPresent}
+                                onClick={() =>
+                                  handleStatus(m.id, "today-present")
+                                }
+                              />
+                            </div>
+
+                            {statusNoshow && reasonText && (
+                              <div className="text-[11px] font-medium px-3 py-2 rounded-xl border bg-rose-50 text-rose-600 border-rose-100">
+                                💬 당일불참 사유:{" "}
+                                {typeof reasonText === "object"
+                                  ? reasonText.value
+                                  : reasonText}
                               </div>
                             )}
-                        </div>
-                      );
-                    })}
+                            {statusAbsent && absentReasonText && (
+                              <div className="text-[11px] font-medium px-3 py-2 rounded-xl border bg-slate-50 text-slate-600 border-slate-100">
+                                💬 일반불참 사유:{" "}
+                                {typeof absentReasonText === "object"
+                                  ? absentReasonText.value
+                                  : absentReasonText}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="text-center py-8 text-xs font-bold text-slate-400 bg-slate-50 border border-dashed rounded-2xl">
+                        🔍 '{searchTerm}' 이름과 일치하는 회원이 없습니다.
+                      </div>
+                    )}
                   </div>
 
                   {isActualAdmin ? (
@@ -814,15 +891,16 @@
                     </form>
                   ) : (
                     <div className="text-center py-4 text-xs font-bold text-slate-400 bg-slate-50 border border-dashed rounded-2xl">
-                      🔒 관리자로 로그인하면 신규 명부를 등록할 수 있습니다.
+                      🔒 자물쇠 아이콘을 통해 인증하면 조작 및 추가가
+                      가능합니다.
                     </div>
                   )}
                 </div>
               ) : (
-                // 랭킹 영역 (일반회원도 100% 터치 및 아코디언 확장 정상 사용 가능)
+                // 랭킹 영역
                 <div className="space-y-3">
                   <h2 className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-4 px-1">
-                    Season Standings (상세 터치 가능)
+                    Season Standings
                   </h2>
                   {sortedMembersByRanking.map((m, i) => {
                     const isExpanded = expandedMemberId === m.id;
@@ -832,9 +910,13 @@
                       presentPct: "0.0",
                       absentPct: "0.0",
                       noshowPct: "0.0",
-                      totalDays: 0,
+                      todayPresentPct: "0.0",
                       present: 0,
+                      todayPresent: 0,
                     };
+
+                    const totalPlayedMatches =
+                      Number(mStats.present) + Number(mStats.todayPresent);
 
                     return (
                       <div
@@ -857,7 +939,7 @@
                               {m.name}
                             </div>
                             <div className="text-[10px] text-gray-400 font-bold uppercase mt-1 tracking-tighter">
-                              Played {mStats.present} Match(es)
+                              Played {totalPlayedMatches} Match(es)
                             </div>
                           </div>
                           <div
@@ -867,17 +949,18 @@
                           </div>
                         </div>
 
+                        {/* 확장 아코디언 */}
                         {isExpanded && (
                           <div className="bg-slate-50 rounded-b-[1.5rem] p-4 border-t border-gray-100 space-y-4 text-xs">
-                            {/* 통계 퍼센트(%) 표시 레이아웃 */}
+                            {/* 4대 출석 비율 그래프 바 */}
                             <div className="space-y-2 bg-white p-3.5 rounded-2xl border border-gray-100 shadow-3xs">
                               <div className="font-bold text-gray-700 text-[11px] uppercase tracking-wider flex items-center gap-1">
-                                📊 개인 활동 통계 비율
+                                📊 개인 출석 분포 통계 비율
                               </div>
                               <div className="space-y-2 pt-1">
                                 <div>
                                   <div className="flex justify-between font-bold text-[10px] text-slate-500 mb-1">
-                                    <span>참석률</span>
+                                    <span>정상참석률</span>
                                     <span className="text-emerald-500">
                                       {mStats.presentPct}%
                                     </span>
@@ -886,6 +969,22 @@
                                     <div
                                       className="bg-emerald-500 h-full"
                                       style={{ width: mStats.presentPct + "%" }}
+                                    ></div>
+                                  </div>
+                                </div>
+                                <div>
+                                  <div className="flex justify-between font-bold text-[10px] text-slate-500 mb-1">
+                                    <span>당일참석률</span>
+                                    <span className="text-blue-500">
+                                      {mStats.todayPresentPct}%
+                                    </span>
+                                  </div>
+                                  <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                                    <div
+                                      className="bg-blue-500 h-full"
+                                      style={{
+                                        width: mStats.todayPresentPct + "%",
+                                      }}
                                     ></div>
                                   </div>
                                 </div>
@@ -920,7 +1019,7 @@
                               </div>
                             </div>
 
-                            {/* 머리말 구분이 포함된 사유 리스트 출력 섹션 */}
+                            {/* 머리말 로그 단락 */}
                             <div className="space-y-2">
                               <div className="font-bold text-slate-700 text-[11px] uppercase tracking-wider flex items-center gap-1">
                                 📋 불참 누적 사유 기록
@@ -961,8 +1060,8 @@
                                 </div>
                               ) : (
                                 <p className="text-gray-400 italic py-1 pl-1">
-                                  불참 기록이 전혀 없는 신뢰의 만점 회원입니다!
-                                  👍
+                                  특이 기입 사유가 전혀 없는 출석 최우수
+                                  회원입니다! 👍
                                 </p>
                               )}
                             </div>
@@ -975,7 +1074,7 @@
               )}
             </main>
 
-            {/* 관리자 이메일 로그인 입력 팝업 모달 */}
+            {/* 관리자 로그인 모달 */}
             {loginModal.isOpen && (
               <div className="fixed inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4 z-50">
                 <form
@@ -1046,7 +1145,7 @@
               </div>
             )}
 
-            {/* 불참 및 당일불참 사유 등록 팝업 모달 */}
+            {/* 사유 등록 모달 */}
             {reasonModal.isOpen && (
               <div className="fixed inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4 z-50">
                 <div className="bg-white w-full max-w-sm rounded-3xl p-5 shadow-2xl space-y-4 animate-in fade-in zoom-in-95 duration-150">
@@ -1064,7 +1163,7 @@
                   </div>
                   <textarea
                     rows="3"
-                    placeholder="구체적인 사유를 적어주세요. (예: 급한 야근, 부상, 출장 등)"
+                    placeholder="구체적인 특이 사유를 적어주세요. (예: 급한 야근, 부상, 출장 등)"
                     value={reasonModal.reason}
                     onChange={(e) =>
                       setReasonModal(
@@ -1093,7 +1192,7 @@
                     <button
                       type="button"
                       onClick={saveReason}
-                      className={`py-2.5 text-white font-bold rounded-2xl text-xs transition shadow-lg ${reasonModal.type === "no-show" ? "bg-rose-500 hover:bg-rose-600 shadow-rose-100" : "bg-slate-600 hover:bg-slate-700 shadow-slate-100"}`}
+                      className="py-2.5 text-white font-bold rounded-2xl text-xs transition shadow-lg shadow-rose-100 bg-rose-500 hover:bg-rose-600"
                     >
                       사유 저장하기
                     </button>
@@ -1124,19 +1223,18 @@
         <button
           onClick={props.onClick}
           className={
-            "flex-1 flex flex-col items-center py-3 rounded-2xl border-2 transition-all active:scale-95 " +
+            "flex-1 flex flex-col items-center py-2.5 rounded-xl border transition-all active:scale-95 " +
             (props.active
-              ? props.color +
-                " text-white border-transparent shadow-lg shadow-blue-100"
-              : "bg-white text-gray-400 border-gray-50 hover:border-gray-200")
+              ? props.color + " text-white border-transparent shadow-md"
+              : "bg-white text-gray-400 border-gray-100 hover:border-gray-200")
           }
         >
-          <span className="text-[11px] font-black tracking-tighter uppercase leading-none">
+          <span className="text-[10px] font-black tracking-tighter uppercase leading-none">
             {props.label}
           </span>
           <span
             className={
-              "text-[9px] font-bold mt-1 " +
+              "text-[8px] font-bold mt-0.5 " +
               (props.active ? "text-white/80" : "text-gray-300")
             }
           >
